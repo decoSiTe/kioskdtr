@@ -302,20 +302,22 @@
     state.logs = state.logs.slice(0, 100);
     saveState(state);
 
+    // Only send the ONE field that was tapped — never send empty fields
     const payload = {
+      type: "attendance",
       date,
       employeeCode: emp.code,
       employeeName: emp.name,
       department: emp.department || "",
       position: emp.position || "",
-      arrival: updated.arrival || "",
-      breakStart: updated.breakStart || "",
-      breakEnd: updated.breakEnd || "",
-      departure: updated.departure || "",
       lastAction: actionLabels[actionKey],
       timestamp,
       source: "qr-kiosk"
     };
+    if (actionKey === "arrival")    payload.arrival    = time;
+    if (actionKey === "breakStart") payload.breakStart = time;
+    if (actionKey === "breakEnd")   payload.breakEnd   = time;
+    if (actionKey === "departure")  payload.departure  = time;
 
     showStatus(`✅ ${emp.name} — ${actionLabels[actionKey]} at ${time}`, "success");
     syncToSheets(payload);
