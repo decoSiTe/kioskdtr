@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Employee Kiosk – DTR</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #dbe4ee;
+      --primary: #0f172a;
+      --primary-2: #1e293b;
+      --soft: #f1f5f9;
+      --danger: #dc2626;
+      --success: #15803d;
+      --shadow: 0 10px 30px rgba(15,23,42,0.08);
+      --radius: 22px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    h1,h2,h3,h4,p { margin: 0; }
+    .wrap {
+      width: 100%;
+      max-width: 480px;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .header h1 { font-size: 22px; font-weight: 800; }
+    .header p { color: var(--muted); margin-top: 4px; font-size: 14px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 24px;
+      margin-bottom: 16px;
+    }
+    .card h3 { margin-bottom: 6px; font-size: 16px; }
+    .desc { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+    input {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-align: center;
+      outline: none;
+      background: var(--soft);
+    }
+    input:focus { border-color: var(--primary); background: white; }
+    .btn {
+      border: none;
+      background: var(--primary);
+      color: white;
+      padding: 12px 16px;
+      border-radius: 16px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      width: 100%;
+      margin-top: 10px;
+    }
+    .btn:hover { background: var(--primary-2); }
+    .btn.secondary {
+      background: white;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .action-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .action-btn {
+      padding: 18px 10px;
+      border-radius: 18px;
+      border: none;
+      background: var(--primary);
+      color: white;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .action-btn:active { transform: scale(0.97); }
+    .action-btn:hover { background: var(--primary-2); }
+    .action-btn:disabled { background: var(--border); color: var(--muted); cursor: not-allowed; }
+    .emp-card {
+      background: var(--soft);
+      border-radius: 16px;
+      padding: 16px;
+      margin-top: 16px;
+      text-align: center;
+    }
+    .emp-name { font-size: 22px; font-weight: 800; margin-bottom: 4px; }
+    .emp-meta { color: var(--muted); font-size: 13px; }
+    .status {
+      margin-top: 14px;
+      padding: 12px 16px;
+      border-radius: 14px;
+      background: var(--soft);
+      font-size: 14px;
+      text-align: center;
+    }
+    .status.success { background: #dcfce7; color: #166534; }
+    .status.error { background: #fee2e2; color: #991b1b; }
+    .hidden { display: none !important; }
+    #reader { border-radius: 14px; overflow: hidden; margin-top: 10px; }
+    #reader video { border-radius: 14px; }
+    .clock {
+      text-align: center;
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      margin-bottom: 4px;
+    }
+    .date-display {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+    .reset-note {
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <h1>Employee Kiosk</h1>
+      <p>Daily Time Record System</p>
+    </div>
+
+    <!-- Clock -->
+    <div class="clock" id="clockDisplay">--:--:--</div>
+    <div class="date-display" id="dateDisplay"></div>
+
+    <!-- Input Card -->
+    <div class="card" id="inputCard">
+      <h3>Enter Employee Code</h3>
+      <p class="desc">Type your employee code or scan your QR badge.</p>
+      <input id="empCodeInput" placeholder="e.g. EMP001" maxlength="20" autocomplete="off" autocapitalize="characters" />
+      <button class="btn" id="scanBtn">📷 Scan QR Code</button>
+      <div id="reader" class="hidden"></div>
+      <button class="btn secondary hidden" id="closeScanBtn">Close Scanner</button>
+    </div>
+
+    <!-- Employee Action Card (hidden until code found) -->
+    <div class="card hidden" id="actionCard">
+      <div class="emp-card">
+        <div class="emp-name" id="empName"></div>
+        <div class="emp-meta" id="empMeta"></div>
+      </div>
+      <div class="action-grid">
+        <button class="action-btn" data-action="arrival">✅ Arrived</button>
+        <button class="action-btn" data-action="breakStart">☕ Break Start</button>
+        <button class="action-btn" data-action="breakEnd">🔄 Break End</button>
+        <button class="action-btn" data-action="departure">🏠 Departure</button>
+      </div>
+      <div class="reset-note">After tapping, kiosk resets automatically.</div>
+    </div>
+
+    <!-- Status -->
+    <div class="status hidden" id="statusMsg"></div>
+  </div>
+
+<script>
+  // ── CONFIG ── paste your Google Apps Script Web App URL here ──────────────
+  const GOOGLE_SHEET_URL = "YOUR_APPS_SCRIPT_URL_HERE";
+  // ── The main DTR app URL (index.html) to share employee data ─────────────
+  const DTR_APP_URL = ""; // e.g. "https://yourname.github.io/DTR/"
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const STORAGE_KEY = "dtr-index-html-v1";
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : { employees: [], records: {} };
+    } catch { return { employees: [], records: {} }; }
+  }
+
+  function saveState(state) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  function formatDateISO(d = new Date()) {
+    return d.toLocaleDateString("en-CA");
+  }
+
+  function formatTime(d = new Date()) {
+    return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+
+  // Clock
+  function updateClock() {
+    const now = new Date();
+    document.getElementById("clockDisplay").textContent =
+      now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    document.getElementById("dateDisplay").textContent =
+      now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  // Employee lookup
+  const codeInput = document.getElementById("empCodeInput");
+  const actionCard = document.getElementById("actionCard");
+  const inputCard = document.getElementById("inputCard");
+  const statusMsg = document.getElementById("statusMsg");
+
+  let currentEmployee = null;
+  let scannerInstance = null;
+
+  codeInput.addEventListener("input", () => {
+    const code = codeInput.value.trim().toUpperCase();
+    const state = loadState();
+    const emp = state.employees.find(e => e.code.toUpperCase() === code);
+    if (emp) {
+      showEmployee(emp);
+    } else {
+      hideEmployee();
+    }
+  });
+
+  function showEmployee(emp) {
+    currentEmployee = emp;
+    document.getElementById("empName").textContent = emp.name;
+    document.getElementById("empMeta").textContent =
+      `${emp.code} · ${emp.department || ""} · ${emp.position || ""}`;
+    actionCard.classList.remove("hidden");
+    statusMsg.classList.add("hidden");
+  }
+
+  function hideEmployee() {
+    currentEmployee = null;
+    actionCard.classList.add("hidden");
+  }
+
+  // Actions
+  document.querySelectorAll(".action-btn").forEach(btn => {
+    btn.addEventListener("click", () => handleAction(btn.dataset.action));
+  });
+
+  async function handleAction(actionKey) {
+    if (!currentEmployee) return;
+    const emp = currentEmployee;
+    const state = loadState();
+
+    const now = new Date();
+    const date = formatDateISO(now);
+    const time = formatTime(now);
+    const timestamp = now.toISOString();
+
+    const actionLabels = {
+      arrival: "Arrived",
+      breakStart: "Break Start",
+      breakEnd: "Break End",
+      departure: "Departure"
+    };
+
+    // Get or create today's record for this employee
+    if (!state.records) state.records = {};
+    const key = `${emp.id}__${date}`;
+    const current = state.records[key] || { arrival: "", breakStart: "", breakEnd: "", departure: "" };
+    const updated = { ...current, [actionKey]: time };
+    state.records[key] = updated;
+
+    // Add to logs
+    if (!state.logs) state.logs = [];
+    state.logs.unshift({
+      date, time, timestamp,
+      employeeCode: emp.code,
+      employeeName: emp.name,
+      department: emp.department,
+      position: emp.position,
+      lastActionLabel: actionLabels[actionKey]
+    });
+    state.logs = state.logs.slice(0, 100);
+    saveState(state);
+
+    const payload = {
+      date,
+      employeeCode: emp.code,
+      employeeName: emp.name,
+      department: emp.department || "",
+      position: emp.position || "",
+      arrival: updated.arrival || "",
+      breakStart: updated.breakStart || "",
+      breakEnd: updated.breakEnd || "",
+      departure: updated.departure || "",
+      lastAction: actionLabels[actionKey],
+      timestamp,
+      source: "qr-kiosk"
+    };
+
+    showStatus(`✅ ${emp.name} — ${actionLabels[actionKey]} at ${time}`, "success");
+    syncToSheets(payload);
+
+    // Reset after 2 seconds
+    setTimeout(() => {
+      codeInput.value = "";
+      hideEmployee();
+      statusMsg.classList.add("hidden");
+    }, 2000);
+  }
+
+  function showStatus(msg, type = "") {
+    statusMsg.textContent = msg;
+    statusMsg.className = "status" + (type ? " " + type : "");
+  }
+
+  async function syncToSheets(payload) {
+    if (!GOOGLE_SHEET_URL || GOOGLE_SHEET_URL === "YOUR_APPS_SCRIPT_URL_HERE") return;
+    try {
+      await fetch(GOOGLE_SHEET_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      try {
+        const params = new URLSearchParams({ data: JSON.stringify(payload) });
+        await fetch(`${GOOGLE_SHEET_URL}?${params}`, { method: "GET", mode: "no-cors" });
+      } catch (_) {}
+    }
+  }
+
+  // QR Scanner
+  const scanBtn = document.getElementById("scanBtn");
+  const closeScanBtn = document.getElementById("closeScanBtn");
+  const readerDiv = document.getElementById("reader");
+
+  scanBtn.addEventListener("click", () => {
+    readerDiv.classList.remove("hidden");
+    closeScanBtn.classList.remove("hidden");
+    scanBtn.classList.add("hidden");
+
+    scannerInstance = new Html5Qrcode("reader");
+    scannerInstance.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 220, height: 220 } },
+      (decodedText) => {
+        // Extract employee code from URL or raw text
+        let code = decodedText.trim().toUpperCase();
+        try {
+          const url = new URL(decodedText);
+          const emp = url.searchParams.get("employee");
+          if (emp) code = emp.toUpperCase();
+        } catch (_) {}
+        codeInput.value = code;
+        codeInput.dispatchEvent(new Event("input"));
+        stopScanner();
+      },
+      () => {}
+    ).catch(err => {
+      showStatus("Camera error: " + err, "error");
+      stopScanner();
+    });
+  });
+
+  closeScanBtn.addEventListener("click", stopScanner);
+
+  function stopScanner() {
+    if (scannerInstance) {
+      scannerInstance.stop().catch(() => {}).finally(() => {
+        scannerInstance = null;
+        readerDiv.classList.add("hidden");
+        closeScanBtn.classList.add("hidden");
+        scanBtn.classList.remove("hidden");
+        readerDiv.innerHTML = "";
+      });
+    }
+  }
+
+  // Auto-focus input
+  codeInput.focus();
+</script>
+</body>
+</html>
