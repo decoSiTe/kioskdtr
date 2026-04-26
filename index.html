@@ -117,24 +117,35 @@
 
   // Load employees + today's attendance records from Sheets
   async function loadEmps() {
-    if (!SCRIPT_URL || SCRIPT_URL==="YOUR_APPS_SCRIPT_URL_HERE") {
+    if (!SCRIPT_URL || SCRIPT_URL==="https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec") {
       toast("⚠ Script URL not set in kiosk.html","err");
       show("loadCard",false); show("inputCard",true);
       return;
     }
     try {
       const today = fmt();
-      const r = await fetch(`${SCRIPT_URL}?action=getEmployees&date=${today}`,{cache:"no-cache"});
+      // 10 second timeout — Apps Script can be slow on first load
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const r = await fetch(`${SCRIPT_URL}?action=getEmployees&date=${today}`, {
+        cache: "no-cache",
+        signal: controller.signal
+      });
+      clearTimeout(timer);
       const d = await r.json();
       employees = d.employees || [];
       todayRecords = {};
       (d.todayRecords || []).forEach(rec => {
         todayRecords[String(rec.code).toUpperCase()] = rec;
       });
-      if (employees.length===0) toast("No employees found. Add from Admin Panel first.","err");
+      if (employees.length===0) toast("No employees found. Add employees from Admin Panel first.","err");
       else { toast(`✓ ${employees.length} employee(s) loaded`,"ok"); setTimeout(hideToast,2500); }
     } catch(e) {
-      toast("Cannot reach server. Check your Apps Script URL.","err");
+      if (e.name === "AbortError") {
+        toast("⏱ Server timeout. Check your Apps Script is deployed correctly.","err");
+      } else {
+        toast("⚠ Could not load employees: " + e.message,"err");
+      }
     }
     show("loadCard",false); show("inputCard",true);
     document.getElementById("empIn").focus();
@@ -229,7 +240,7 @@
   }
 
   async function sendToSheet(payload) {
-    if (!SCRIPT_URL || SCRIPT_URL==="https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec") return;
+    if (!SCRIPT_URL || SCRIPT_URL==="YOUR_APPS_SCRIPT_URL_HERE") return;
     const encoded = encodeURIComponent(JSON.stringify(payload));
     // POST (primary)
     try {
