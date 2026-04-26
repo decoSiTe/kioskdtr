@@ -92,7 +92,7 @@
 
 <script>
   // ── PASTE YOUR APPS SCRIPT WEB APP URL HERE ───────────────────────────────
-  const SCRIPT_URL = "YOUR_APPS_SCRIPT_URL_HERE";
+  const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec";
   // ─────────────────────────────────────────────────────────────────────────
 
   let employees = [];
@@ -116,7 +116,7 @@
 
   // Load employees + today's attendance records from Sheets
   async function loadEmps() {
-    if (!SCRIPT_URL || SCRIPT_URL==="YOUR_APPS_SCRIPT_URL_HERE") {
+    if (!SCRIPT_URL || SCRIPT_URL==="https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec") {
       toast("⚠ Script URL not set in kiosk.html","err");
       show("loadCard",false); show("inputCard",true);
       return;
@@ -228,7 +228,7 @@
   }
 
   async function sendToSheet(payload) {
-    if (!SCRIPT_URL || SCRIPT_URL==="YOUR_APPS_SCRIPT_URL_HERE") return;
+    if (!SCRIPT_URL || SCRIPT_URL==="https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec") return;
     const encoded = encodeURIComponent(JSON.stringify(payload));
     // POST (primary)
     try {
