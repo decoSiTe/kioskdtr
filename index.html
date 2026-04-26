@@ -98,6 +98,7 @@
   let employees = [];
   let currentEmp = null;
   let scanner = null;
+  let isSending = false;
   let todayRecords = {}; // { "409": { arrival:"08:13", breakStart:"09:00", ... } }
 
   // Clock
@@ -116,7 +117,7 @@
 
   // Load employees + today's attendance records from Sheets
   async function loadEmps() {
-    if (!SCRIPT_URL || SCRIPT_URL==="https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec") {
+    if (!SCRIPT_URL || SCRIPT_URL==="YOUR_APPS_SCRIPT_URL_HERE") {
       toast("⚠ Script URL not set in kiosk.html","err");
       show("loadCard",false); show("inputCard",true);
       return;
