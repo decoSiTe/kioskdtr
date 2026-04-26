@@ -92,7 +92,7 @@
 
 <script>
   // ── PASTE YOUR APPS SCRIPT WEB APP URL HERE ───────────────────────────────
-  const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec";
+  const SCRIPT_URL = "YOUR_APPS_SCRIPT_URL_HERE";
   // ─────────────────────────────────────────────────────────────────────────
 
   let employees = [];
@@ -153,24 +153,17 @@
     document.getElementById("eMeta").textContent =
       `${emp.code} · ${emp.department||""} · ${emp.position||""}`;
 
-    // Update all 4 buttons — disable if already tapped today
+    // Store doneTime on each button but keep them VISIBLE and ACTIVE
     const rec = todayRecords[String(emp.code).toUpperCase()] || {};
     document.querySelectorAll(".abtn").forEach(btn => {
       const key = btn.dataset.a;
-      const doneTime = rec[key];
-      if (doneTime) {
-        btn.disabled = true;
-        btn.style.opacity = "0.38";
-        btn.style.cursor  = "not-allowed";
-        btn.style.background = "#64748b";
-        btn.dataset.doneTime = doneTime;
-      } else {
-        btn.disabled = false;
-        btn.style.opacity = "1";
-        btn.style.cursor  = "pointer";
-        btn.style.background = "";
-        btn.dataset.doneTime = "";
-      }
+      const doneTime = rec[key] || "";
+      btn.dataset.doneTime = doneTime;
+      // Always full opacity and clickable — warning shown on tap if already done
+      btn.disabled = false;
+      btn.style.opacity = "1";
+      btn.style.cursor  = "pointer";
+      btn.style.background = "";
     });
 
     show("actCard",true); hideToast();
@@ -179,33 +172,38 @@
 
   // Action buttons
   const labels = {arrival:"Arrived",breakStart:"Break Start",breakEnd:"Break End",departure:"Departure"};
+  const warnMsgs = {
+    arrival:    "⚠️ Arrived already recorded",
+    breakStart: "⚠️ Break Start already recorded",
+    breakEnd:   "⚠️ Break End already recorded",
+    departure:  "⚠️ Departure already recorded"
+  };
+
   document.querySelectorAll(".abtn").forEach(b => b.addEventListener("click", () => {
+    if (isSending) return;
     const doneTime = b.dataset.doneTime;
     if (doneTime) {
-      toast(`⚠️ ${labels[b.dataset.a]} already recorded at ${doneTime}`, "warn");
+      toast(`${warnMsgs[b.dataset.a]} at ${doneTime}`, "warn");
       return;
     }
     doAction(b.dataset.a);
   }));
 
   async function doAction(key) {
-    if (!currentEmp) return;
+    if (!currentEmp || isSending) return;
+    isSending = true;
+
     const emp = currentEmp;
     const now = new Date(), date=fmt(now), time=fmtT(now), ts=now.toISOString();
 
-    // Lock button immediately so it can't be tapped again
+    // Store locally so warning shows if tapped again
     const codeKey = String(emp.code).toUpperCase();
     if (!todayRecords[codeKey]) todayRecords[codeKey] = {};
     todayRecords[codeKey][key] = time;
 
+    // Update the tapped button's doneTime so re-tap shows warning
     const btn = document.querySelector(`.abtn[data-a="${key}"]`);
-    if (btn) {
-      btn.disabled = true;
-      btn.style.opacity  = "0.38";
-      btn.style.cursor   = "not-allowed";
-      btn.style.background = "#64748b";
-      btn.dataset.doneTime = time;
-    }
+    if (btn) btn.dataset.doneTime = time;
 
     const payload = {
       type:"attendance", date, timestamp:ts,
@@ -219,24 +217,30 @@
     if (key==="departure")  payload.departure  = time;
 
     toast(`✅ ${emp.name} — ${labels[key]} recorded at ${time}`, "ok");
-    sendSheet(payload);
+    await sendToSheet(payload);
 
     setTimeout(()=>{
+      isSending = false;
       document.getElementById("empIn").value="";
       hideEmp(); hideToast();
       document.getElementById("empIn").focus();
-    }, 2500);
+    }, 3000);
   }
 
-  async function sendSheet(payload) {
+  async function sendToSheet(payload) {
     if (!SCRIPT_URL || SCRIPT_URL==="YOUR_APPS_SCRIPT_URL_HERE") return;
+    const encoded = encodeURIComponent(JSON.stringify(payload));
+    // POST (primary)
     try {
       await fetch(SCRIPT_URL, {
         method:"POST", mode:"no-cors",
         headers:{"Content-Type":"text/plain;charset=utf-8"},
         body:JSON.stringify(payload)
       });
-    } catch(e) {}
+    } catch(e) {
+      // GET fallback via image ping — always reaches Apps Script
+      try { new Image().src = SCRIPT_URL + "?data=" + encoded; } catch(_){}
+    }
   }
 
   // Scanner
