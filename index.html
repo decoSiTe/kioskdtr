@@ -41,12 +41,10 @@
     .abtn:active{transform:scale(.97);}
     .abtn:hover{opacity:.85;}
     .note{text-align:center;color:var(--muted);font-size:12px;margin-top:10px;}
-    .toast{padding:12px 16px;border-radius:14px;font-size:14px;text-align:center;
-      display:none;margin-top:0;}
+    .toast{padding:12px 16px;border-radius:14px;font-size:14px;text-align:center;display:none;margin-top:0;}
     .toast.show{display:block;}
     .toast.ok{background:#dcfce7;color:#166534;}
     .toast.err{background:#fee2e2;color:#991b1b;}
-    .toast.info{background:#eff6ff;color:#1e40af;}
     .toast.warn{background:#fef9c3;color:#854d0e;}
     .hidden{display:none!important;}
     #reader{border-radius:14px;overflow:hidden;margin-top:10px;}
@@ -91,7 +89,7 @@
 </div>
 
 <script>
-  // ── PASTE YOUR APPS SCRIPT WEB APP URL HERE ───────────────────────────────
+  // ── YOUR APPS SCRIPT URL ─────────────────────────────────────────────────
   const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec";
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -99,7 +97,7 @@
   let currentEmp = null;
   let scanner = null;
   let isSending = false;
-  let todayRecords = {}; // { "409": { arrival:"08:13", breakStart:"09:00", ... } }
+  let todayRecords = {};
 
   // Clock
   function tick() {
@@ -115,19 +113,19 @@
   const fmtT = (d=new Date()) =>
     d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
 
-  // Load employees + today's attendance records from Sheets
+  // ── Load employees from Google Sheets ─────────────────────────────────────
   async function loadEmps() {
-    if (!SCRIPT_URL || SCRIPT_URL==="https://script.google.com/macros/s/AKfycbzMzFmREpMCZ2m9t1k0Aip4cBVswPDJe_80sUw4MioHSUSnQpp8LOLzfsM-fPkxLf4Qww/exec") {
-      toast("⚠ Script URL not set in kiosk.html","err");
+    // Only skip if URL is literally the placeholder text
+    if (!SCRIPT_URL || SCRIPT_URL.trim() === "YOUR_APPS_SCRIPT_URL_HERE") {
+      toast("⚠ Script URL not configured","err");
       show("loadCard",false); show("inputCard",true);
       return;
     }
     try {
       const today = fmt();
-      // 10 second timeout — Apps Script can be slow on first load
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
-      const r = await fetch(`${SCRIPT_URL}?action=getEmployees&date=${today}`, {
+      const timer = setTimeout(() => controller.abort(), 12000);
+      const r = await fetch(SCRIPT_URL + "?action=getEmployees&date=" + today, {
         cache: "no-cache",
         signal: controller.signal
       });
@@ -135,27 +133,32 @@
       const d = await r.json();
       employees = d.employees || [];
       todayRecords = {};
-      (d.todayRecords || []).forEach(rec => {
+      (d.todayRecords || []).forEach(function(rec) {
         todayRecords[String(rec.code).toUpperCase()] = rec;
       });
-      if (employees.length===0) toast("No employees found. Add employees from Admin Panel first.","err");
-      else { toast(`✓ ${employees.length} employee(s) loaded`,"ok"); setTimeout(hideToast,2500); }
+      if (employees.length === 0) {
+        toast("No employees found. Add from Admin Panel first.","err");
+      } else {
+        toast("✓ " + employees.length + " employee(s) loaded","ok");
+        setTimeout(hideToast, 2500);
+      }
     } catch(e) {
       if (e.name === "AbortError") {
-        toast("⏱ Server timeout. Check your Apps Script is deployed correctly.","err");
+        toast("⏱ Timeout — Apps Script too slow. Try refreshing.","err");
       } else {
-        toast("⚠ Could not load employees: " + e.message,"err");
+        toast("⚠ Error: " + e.message,"err");
       }
     }
-    show("loadCard",false); show("inputCard",true);
+    show("loadCard",false);
+    show("inputCard",true);
     document.getElementById("empIn").focus();
   }
   loadEmps();
 
-  // Live lookup as user types
-  document.getElementById("empIn").addEventListener("input", e => {
+  // ── Live employee lookup ──────────────────────────────────────────────────
+  document.getElementById("empIn").addEventListener("input", function(e) {
     const code = e.target.value.trim().toUpperCase();
-    const emp = employees.find(x => String(x.code).toUpperCase()===code);
+    const emp = employees.find(function(x){ return String(x.code).toUpperCase() === code; });
     if (emp) showEmp(emp); else hideEmp();
   });
 
@@ -163,26 +166,20 @@
     currentEmp = emp;
     document.getElementById("eName").textContent = emp.name;
     document.getElementById("eMeta").textContent =
-      `${emp.code} · ${emp.department||""} · ${emp.position||""}`;
-
-    // Store doneTime on each button but keep them VISIBLE and ACTIVE
+      emp.code + " · " + (emp.department||"") + " · " + (emp.position||"");
     const rec = todayRecords[String(emp.code).toUpperCase()] || {};
-    document.querySelectorAll(".abtn").forEach(btn => {
-      const key = btn.dataset.a;
-      const doneTime = rec[key] || "";
-      btn.dataset.doneTime = doneTime;
-      // Always full opacity and clickable — warning shown on tap if already done
+    document.querySelectorAll(".abtn").forEach(function(btn) {
+      btn.dataset.doneTime = rec[btn.dataset.a] || "";
       btn.disabled = false;
       btn.style.opacity = "1";
-      btn.style.cursor  = "pointer";
+      btn.style.cursor = "pointer";
       btn.style.background = "";
     });
-
     show("actCard",true); hideToast();
   }
   function hideEmp() { currentEmp=null; show("actCard",false); }
 
-  // Action buttons
+  // ── Action buttons ────────────────────────────────────────────────────────
   const labels = {arrival:"Arrived",breakStart:"Break Start",breakEnd:"Break End",departure:"Departure"};
   const warnMsgs = {
     arrival:    "⚠️ Arrived already recorded",
@@ -191,30 +188,27 @@
     departure:  "⚠️ Departure already recorded"
   };
 
-  document.querySelectorAll(".abtn").forEach(b => b.addEventListener("click", () => {
-    if (isSending) return;
-    const doneTime = b.dataset.doneTime;
-    if (doneTime) {
-      toast(`${warnMsgs[b.dataset.a]} at ${doneTime}`, "warn");
-      return;
-    }
-    doAction(b.dataset.a);
-  }));
+  document.querySelectorAll(".abtn").forEach(function(b) {
+    b.addEventListener("click", function() {
+      if (isSending) return;
+      if (b.dataset.doneTime) {
+        toast(warnMsgs[b.dataset.a] + " at " + b.dataset.doneTime, "warn");
+        return;
+      }
+      doAction(b.dataset.a);
+    });
+  });
 
   async function doAction(key) {
     if (!currentEmp || isSending) return;
     isSending = true;
-
     const emp = currentEmp;
     const now = new Date(), date=fmt(now), time=fmtT(now), ts=now.toISOString();
 
-    // Store locally so warning shows if tapped again
     const codeKey = String(emp.code).toUpperCase();
     if (!todayRecords[codeKey]) todayRecords[codeKey] = {};
     todayRecords[codeKey][key] = time;
-
-    // Update the tapped button's doneTime so re-tap shows warning
-    const btn = document.querySelector(`.abtn[data-a="${key}"]`);
+    const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
 
     const payload = {
@@ -228,21 +222,18 @@
     if (key==="breakEnd")   payload.breakEnd   = time;
     if (key==="departure")  payload.departure  = time;
 
-    toast(`✅ ${emp.name} — ${labels[key]} recorded at ${time}`, "ok");
+    toast("✅ " + emp.name + " — " + labels[key] + " at " + time, "ok");
     await sendToSheet(payload);
 
-    setTimeout(()=>{
+    setTimeout(function() {
       isSending = false;
-      document.getElementById("empIn").value="";
+      document.getElementById("empIn").value = "";
       hideEmp(); hideToast();
       document.getElementById("empIn").focus();
     }, 3000);
   }
 
   async function sendToSheet(payload) {
-    if (!SCRIPT_URL || SCRIPT_URL==="YOUR_APPS_SCRIPT_URL_HERE") return;
-    const encoded = encodeURIComponent(JSON.stringify(payload));
-    // POST (primary)
     try {
       await fetch(SCRIPT_URL, {
         method:"POST", mode:"no-cors",
@@ -250,31 +241,30 @@
         body:JSON.stringify(payload)
       });
     } catch(e) {
-      // GET fallback via image ping — always reaches Apps Script
-      try { new Image().src = SCRIPT_URL + "?data=" + encoded; } catch(_){}
+      try { new Image().src = SCRIPT_URL + "?data=" + encodeURIComponent(JSON.stringify(payload)); } catch(_){}
     }
   }
 
-  // Scanner
-  document.getElementById("scanBtn").addEventListener("click",startScan);
-  document.getElementById("closeBtn").addEventListener("click",stopScan);
+  // ── QR Scanner ────────────────────────────────────────────────────────────
+  document.getElementById("scanBtn").addEventListener("click", startScan);
+  document.getElementById("closeBtn").addEventListener("click", stopScan);
 
   function startScan() {
     show("reader",true); show("closeBtn",true); show("scanBtn",false);
     scanner = new Html5Qrcode("reader");
     scanner.start({facingMode:"environment"},{fps:10,qrbox:{width:220,height:220}},
-      txt=>{
-        let code=txt.trim().toUpperCase();
-        try{ const u=new URL(txt); const p=u.searchParams.get("employee"); if(p) code=p.toUpperCase(); }catch(_){}
-        document.getElementById("empIn").value=code;
+      function(txt) {
+        let code = txt.trim().toUpperCase();
+        try { const u=new URL(txt); const p=u.searchParams.get("employee"); if(p) code=p.toUpperCase(); } catch(_){}
+        document.getElementById("empIn").value = code;
         document.getElementById("empIn").dispatchEvent(new Event("input"));
         stopScan();
-      },()=>{}
-    ).catch(e=>{ toast("Camera error: "+e,"err"); stopScan(); });
+      }, function(){}
+    ).catch(function(e){ toast("Camera error: "+e,"err"); stopScan(); });
   }
 
   function stopScan() {
-    if (scanner) scanner.stop().catch(()=>{}).finally(()=>{
+    if (scanner) scanner.stop().catch(function(){}).finally(function(){
       scanner=null;
       show("reader",false); show("closeBtn",false); show("scanBtn",true);
       document.getElementById("reader").innerHTML="";
@@ -282,7 +272,7 @@
   }
 
   function show(id,v){ document.getElementById(id).classList.toggle("hidden",!v); }
-  function toast(msg,type){ const e=document.getElementById("toast"); e.textContent=msg; e.className=`toast show ${type}`; }
+  function toast(msg,type){ const e=document.getElementById("toast"); e.textContent=msg; e.className="toast show "+(type||""); }
   function hideToast(){ document.getElementById("toast").classList.remove("show"); }
 </script>
 </body>
