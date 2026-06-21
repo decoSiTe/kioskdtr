@@ -79,7 +79,9 @@
     <div class="grid2">
       <button class="abtn" data-a="arrival">✅ Arrived</button>
       <button class="abtn" data-a="breakStart">☕ Break Start</button>
+      <button class="abtn" data-a="shortBreakStart">⏱️ Short Break Start</button>
       <button class="abtn" data-a="breakEnd">🔄 Break End</button>
+      <button class="abtn" data-a="shortBreakEnd">▶️ Short Break End</button>
       <button class="abtn" data-a="departure">🏠 Departure</button>
     </div>
     <p class="note">Kiosk resets automatically after tap.</p>
@@ -180,12 +182,21 @@
   function hideEmp() { currentEmp=null; show("actCard",false); }
 
   // ── Action buttons ────────────────────────────────────────────────────────
-  const labels = {arrival:"Arrived",breakStart:"Break Start",breakEnd:"Break End",departure:"Departure"};
+  const labels = {
+    arrival:"Arrived",
+    breakStart:"Break Start",
+    shortBreakStart:"Short Break Start",
+    breakEnd:"Break End",
+    shortBreakEnd:"Short Break End",
+    departure:"Departure"
+  };
   const warnMsgs = {
-    arrival:    "⚠️ Arrived already recorded",
-    breakStart: "⚠️ Break Start already recorded",
-    breakEnd:   "⚠️ Break End already recorded",
-    departure:  "⚠️ Departure already recorded"
+    arrival:         "⚠️ Arrived already recorded",
+    breakStart:      "⚠️ Break Start already recorded",
+    shortBreakStart: "⚠️ Short Break Start already recorded",
+    breakEnd:        "⚠️ Break End already recorded",
+    shortBreakEnd:   "⚠️ Short Break End already recorded",
+    departure:       "⚠️ Departure already recorded"
   };
 
   document.querySelectorAll(".abtn").forEach(function(b) {
@@ -217,10 +228,12 @@
       department:emp.department||"", position:emp.position||"",
       lastAction:labels[key], source:"qr-kiosk"
     };
-    if (key==="arrival")    payload.arrival    = time;
-    if (key==="breakStart") payload.breakStart = time;
-    if (key==="breakEnd")   payload.breakEnd   = time;
-    if (key==="departure")  payload.departure  = time;
+    if (key==="arrival")         payload.arrival         = time;
+    if (key==="breakStart")      payload.breakStart      = time;
+    if (key==="shortBreakStart") payload.shortBreakStart = time;
+    if (key==="breakEnd")        payload.breakEnd        = time;
+    if (key==="shortBreakEnd")   payload.shortBreakEnd   = time;
+    if (key==="departure")       payload.departure       = time;
 
     toast("✅ " + emp.name + " — " + labels[key] + " at " + time, "ok");
     await sendToSheet(payload);
