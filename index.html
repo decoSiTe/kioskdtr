@@ -361,6 +361,19 @@
 
     .abtn:active{transform:scale(.97);}
 
+    .abtn:disabled,
+    .abtn.locked{
+      opacity:.38 !important;
+      cursor:not-allowed !important;
+      pointer-events:none;
+      filter:grayscale(.35);
+      border-color:rgba(224,224,224,.24) !important;
+      color:rgba(224,224,224,.65) !important;
+      background:rgba(0,0,0,.42) !important;
+      box-shadow:none !important;
+      transform:none !important;
+    }
+
     .note{
       text-align:center;
       color:var(--muted);
@@ -472,6 +485,7 @@
   let scanner = null;
   let isSending = false;
   let todayRecords = {};
+  const QUICK_RESET_MS = 1200;
 
   // Clock
   function tick() {
@@ -488,7 +502,7 @@
     d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
 
   // ── Load employees from Google Sheets ─────────────────────────────────────
-  async function loadEmps() {
+  async function loadEmps(silent) {
     // Only skip if URL is literally the placeholder text
     if (!SCRIPT_URL || SCRIPT_URL.trim() === "YOUR_APPS_SCRIPT_URL_HERE") {
       toast("⚠ Script URL not configured","err");
@@ -511,23 +525,27 @@
         todayRecords[String(rec.code).toUpperCase()] = rec;
       });
       if (employees.length === 0) {
-        toast("No employees found. Add from Admin Panel first.","err");
+        if (!silent) toast("No employees found. Add from Admin Panel first.","err");
       } else {
-        toast("✓ " + employees.length + " employee(s) loaded","ok");
-        setTimeout(hideToast, 2500);
+        if (!silent) {
+          toast("✓ " + employees.length + " employee(s) loaded","ok");
+          setTimeout(hideToast, 2500);
+        }
       }
     } catch(e) {
       if (e.name === "AbortError") {
-        toast("⏱ Timeout — Apps Script too slow. Try refreshing.","err");
+        if (!silent) toast("⏱ Timeout — Apps Script too slow. Try refreshing.","err");
       } else {
-        toast("⚠ Error: " + e.message,"err");
+        if (!silent) toast("⚠ Error: " + e.message,"err");
       }
     }
-    show("loadCard",false);
-    show("inputCard",true);
-    document.getElementById("empIn").focus();
+    if (!silent) {
+      show("loadCard",false);
+      show("inputCard",true);
+      document.getElementById("empIn").focus();
+    }
   }
-  loadEmps();
+  loadEmps(false);
 
   // ── Live employee lookup ──────────────────────────────────────────────────
   document.getElementById("empIn").addEventListener("input", function(e) {
@@ -536,20 +554,46 @@
     if (emp) showEmp(emp); else hideEmp();
   });
 
+  function isDepartureRecorded(rec) {
+    if (!rec) return false;
+    return !!String(rec.departure || "").trim() ||
+      String(rec.lastAction || "").trim().toLowerCase() === "departure";
+  }
+
   function showEmp(emp) {
     currentEmp = emp;
     document.getElementById("eName").textContent = emp.name;
     document.getElementById("eMeta").textContent =
       emp.code + " · " + (emp.department||"") + " · " + (emp.position||"");
+
     const rec = todayRecords[String(emp.code).toUpperCase()] || {};
+    const departedTime = String(rec.departure || "").trim();
+    const alreadyDeparted = isDepartureRecorded(rec);
+
     document.querySelectorAll(".abtn").forEach(function(btn) {
-      btn.dataset.doneTime = rec[btn.dataset.a] || "";
+      const actionKey = btn.dataset.a;
+      btn.dataset.doneTime = rec[actionKey] || "";
+      btn.classList.remove("locked");
+
+      if (alreadyDeparted) {
+        btn.disabled = true;
+        btn.classList.add("locked");
+        btn.dataset.doneTime = departedTime || "Departure";
+        btn.title = "Departure already recorded" + (departedTime ? " at " + departedTime : "") + ". Attendance is completed for today.";
+        return;
+      }
+
       btn.disabled = false;
-      btn.style.opacity = "1";
-      btn.style.cursor = "pointer";
-      btn.style.background = "";
+      btn.title = "";
     });
-    show("actCard",true); hideToast();
+
+    show("actCard",true);
+
+    if (alreadyDeparted) {
+      toast("⚠️ " + emp.name + " already departed" + (departedTime ? " at " + departedTime : "") + ". Attendance completed for today.", "warn");
+    } else {
+      hideToast();
+    }
   }
   function hideEmp() { currentEmp=null; show("actCard",false); }
 
@@ -573,7 +617,15 @@
 
   document.querySelectorAll(".abtn").forEach(function(b) {
     b.addEventListener("click", function() {
-      if (isSending) return;
+      if (isSending || b.disabled) return;
+
+      const codeKey = currentEmp ? String(currentEmp.code).toUpperCase() : "";
+      const rec = todayRecords[codeKey] || {};
+      if (isDepartureRecorded(rec)) {
+        lockDepartedEmployee(currentEmp, rec.departure || "");
+        return;
+      }
+
       if (b.dataset.doneTime) {
         toast(warnMsgs[b.dataset.a] + " at " + b.dataset.doneTime, "warn");
         return;
@@ -581,6 +633,18 @@
       doAction(b.dataset.a);
     });
   });
+
+  function lockDepartedEmployee(emp, departedTime) {
+    document.querySelectorAll(".abtn").forEach(function(btn) {
+      btn.disabled = true;
+      btn.classList.add("locked");
+      btn.dataset.doneTime = departedTime || "Departure";
+      btn.title = "Departure already recorded" + (departedTime ? " at " + departedTime : "") + ". Attendance is completed for today.";
+    });
+    if (emp) {
+      toast("⚠️ " + emp.name + " already departed" + (departedTime ? " at " + departedTime : "") + ". Attendance completed for today.", "warn");
+    }
+  }
 
   async function doAction(key) {
     if (!currentEmp || isSending) return;
@@ -610,12 +674,19 @@
     toast("✅ " + emp.name + " — " + labels[key] + " at " + time, "ok");
     await sendToSheet(payload);
 
+    if (key === "departure") {
+      lockDepartedEmployee(emp, time);
+    }
+
     setTimeout(function() {
       isSending = false;
       document.getElementById("empIn").value = "";
       hideEmp(); hideToast();
       document.getElementById("empIn").focus();
-    }, 3000);
+
+      // Refresh today's records in the background so the next scan uses the latest sheet data.
+      loadEmps(true).catch(function(){});
+    }, QUICK_RESET_MS);
   }
 
   async function sendToSheet(payload) {
