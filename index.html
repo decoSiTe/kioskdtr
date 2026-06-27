@@ -485,7 +485,7 @@
   let scanner = null;
   let isSending = false;
   let todayRecords = {};
-  const QUICK_RESET_MS = 1200;
+  const QUICK_RESET_MS = 500;
 
   // Clock
   function tick() {
@@ -672,7 +672,11 @@
     if (key==="departure")       payload.departure       = time;
 
     toast("✅ " + emp.name + " — " + labels[key] + " at " + time, "ok");
-    await sendToSheet(payload);
+
+    // Send to Google Sheet in the background so the kiosk clears immediately for the next person.
+    sendToSheet(payload)
+      .then(function(){ return loadEmps(true); })
+      .catch(function(){});
 
     if (key === "departure") {
       lockDepartedEmployee(emp, time);
@@ -681,11 +685,9 @@
     setTimeout(function() {
       isSending = false;
       document.getElementById("empIn").value = "";
-      hideEmp(); hideToast();
+      hideEmp();
+      hideToast();
       document.getElementById("empIn").focus();
-
-      // Refresh today's records in the background so the next scan uses the latest sheet data.
-      loadEmps(true).catch(function(){});
     }, QUICK_RESET_MS);
   }
 
