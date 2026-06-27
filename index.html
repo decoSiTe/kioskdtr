@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Employee Kiosk – DTR</title>
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <!-- QR scanner library is loaded only when Scan QR Code is tapped for faster kiosk startup. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
@@ -485,7 +485,7 @@
   let scanner = null;
   let isSending = false;
   let todayRecords = {};
-  const QUICK_RESET_MS = 500;
+  const QUICK_RESET_MS = 350;
 
   // Clock
   function tick() {
@@ -501,6 +501,45 @@
   const fmtT = (d=new Date()) =>
     d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
 
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v3";
+
+  function applyEmployeeData(data) {
+    employees = data.employees || [];
+    todayRecords = {};
+    (data.todayRecords || []).forEach(function(rec) {
+      todayRecords[String(rec.code).toUpperCase()] = rec;
+    });
+
+    const currentCode = document.getElementById("empIn")?.value.trim().toUpperCase();
+    if (currentCode) {
+      document.getElementById("empIn").dispatchEvent(new Event("input"));
+    }
+  }
+
+  function saveEmployeeCache(data) {
+    try {
+      localStorage.setItem(EMP_CACHE_KEY, JSON.stringify({
+        date: fmt(),
+        savedAt: Date.now(),
+        employees: data.employees || [],
+        todayRecords: data.todayRecords || []
+      }));
+    } catch (_) {}
+  }
+
+  function loadEmployeeCache() {
+    try {
+      const raw = localStorage.getItem(EMP_CACHE_KEY);
+      if (!raw) return false;
+      const cached = JSON.parse(raw);
+      if (!cached || cached.date !== fmt()) return false;
+      applyEmployeeData(cached);
+      return employees.length > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ── Load employees from Google Sheets ─────────────────────────────────────
   async function loadEmps(silent) {
     // Only skip if URL is literally the placeholder text
@@ -509,40 +548,54 @@
       show("loadCard",false); show("inputCard",true);
       return;
     }
+
+    // Fast start: show the kiosk immediately using local cache, then sync fresh data in the background.
+    if (!silent) {
+      const hasCache = loadEmployeeCache();
+      show("loadCard",false);
+      show("inputCard",true);
+      document.getElementById("empIn").focus();
+
+      if (hasCache) {
+        toast("✓ Employees ready. Syncing latest records...", "ok");
+        setTimeout(hideToast, 900);
+      } else {
+        toast("Syncing employees...", "warn");
+      }
+    }
+
     try {
       const today = fmt();
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
-      const r = await fetch(SCRIPT_URL + "?action=getEmployees&date=" + today, {
-        cache: "no-cache",
+      const timer = setTimeout(() => controller.abort(), 8000);
+      const r = await fetch(SCRIPT_URL + "?action=getEmployees&date=" + today + "&_=" + Date.now(), {
+        cache: "no-store",
         signal: controller.signal
       });
       clearTimeout(timer);
       const d = await r.json();
-      employees = d.employees || [];
-      todayRecords = {};
-      (d.todayRecords || []).forEach(function(rec) {
-        todayRecords[String(rec.code).toUpperCase()] = rec;
-      });
+
+      applyEmployeeData(d);
+      saveEmployeeCache(d);
+
       if (employees.length === 0) {
         if (!silent) toast("No employees found. Add from Admin Panel first.","err");
       } else {
         if (!silent) {
-          toast("✓ " + employees.length + " employee(s) loaded","ok");
-          setTimeout(hideToast, 2500);
+          toast("✓ " + employees.length + " employee(s) loaded", "ok");
+          setTimeout(hideToast, 900);
         }
       }
     } catch(e) {
-      if (e.name === "AbortError") {
-        if (!silent) toast("⏱ Timeout — Apps Script too slow. Try refreshing.","err");
+      if (!silent && employees.length === 0) {
+        if (e.name === "AbortError") {
+          toast("⏱ Server is slow. Try refreshing.","err");
+        } else {
+          toast("⚠ Error: " + e.message,"err");
+        }
       } else {
-        if (!silent) toast("⚠ Error: " + e.message,"err");
+        console.warn("Employee sync failed:", e);
       }
-    }
-    if (!silent) {
-      show("loadCard",false);
-      show("inputCard",true);
-      document.getElementById("empIn").focus();
     }
   }
   loadEmps(false);
@@ -707,8 +760,33 @@
   document.getElementById("scanBtn").addEventListener("click", startScan);
   document.getElementById("closeBtn").addEventListener("click", stopScan);
 
-  function startScan() {
+  let qrLibPromise = null;
+
+  function ensureQrLibrary() {
+    if (window.Html5Qrcode) return Promise.resolve();
+    if (qrLibPromise) return qrLibPromise;
+
+    qrLibPromise = new Promise(function(resolve, reject) {
+      const s = document.createElement("script");
+      s.src = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = function() { reject(new Error("QR scanner library failed to load.")); };
+      document.head.appendChild(s);
+    });
+    return qrLibPromise;
+  }
+
+  async function startScan() {
     show("reader",true); show("closeBtn",true); show("scanBtn",false);
+    try {
+      await ensureQrLibrary();
+    } catch(e) {
+      toast(e.message, "err");
+      stopScan();
+      return;
+    }
+
     scanner = new Html5Qrcode("reader");
     scanner.start({facingMode:"environment"},{fps:10,qrbox:{width:220,height:220}},
       function(txt) {
