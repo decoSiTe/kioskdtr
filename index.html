@@ -649,46 +649,67 @@
     const hasShortStart = hasValue(rec.shortBreakStart);
     const hasShortEnd = hasValue(rec.shortBreakEnd);
 
-    // First scan of the day: show all 4 break buttons.
-    if (!hasBreakStart && !hasBreakEnd && !hasShortStart && !hasShortEnd) {
-      return ["breakStart", "shortBreakStart", "breakEnd", "shortBreakEnd"];
-    }
+    // IMPORTANT:
+    // End buttons must never appear unless their matching Start button was recorded first.
+    // Break End requires Break Start.
+    // Short Break End requires Short Break Start.
 
-    // Main break already started: next scan must only allow Break End.
+    // Main break already started: only allow Break End.
     if (hasBreakStart && !hasBreakEnd) {
       return ["breakEnd"];
     }
 
-    // Short break already started: next scan must only allow Short Break End.
+    // Short break already started: only allow Short Break End.
     if (hasShortStart && !hasShortEnd) {
       return ["shortBreakEnd"];
     }
 
-    // Main break completed: next scan only shows short break options.
-    if ((hasBreakStart && hasBreakEnd) && !hasShortStart && !hasShortEnd) {
-      return ["shortBreakStart", "shortBreakEnd"];
+    // Main break completed, short break not started: only allow Short Break Start.
+    if (hasBreakStart && hasBreakEnd && !hasShortStart && !hasShortEnd) {
+      return ["shortBreakStart"];
     }
 
-    // If data was saved with Break End only, continue to short break options.
+    // Short break completed, main break not started: only allow Break Start.
+    if (!hasBreakStart && !hasBreakEnd && hasShortStart && hasShortEnd) {
+      return ["breakStart"];
+    }
+
+    // Nothing started yet: show only the two Start buttons.
+    // Do not show Break End or Short Break End at this stage.
+    if (!hasBreakStart && !hasBreakEnd && !hasShortStart && !hasShortEnd) {
+      return ["breakStart", "shortBreakStart"];
+    }
+
+    // Old/incorrect data safety:
+    // If an End exists without its Start, do not show that End button again.
     if (!hasBreakStart && hasBreakEnd && !hasShortStart && !hasShortEnd) {
-      return ["shortBreakStart", "shortBreakEnd"];
+      return ["shortBreakStart"];
+    }
+    if (!hasShortStart && hasShortEnd && !hasBreakStart && !hasBreakEnd) {
+      return ["breakStart"];
     }
 
-    // If everything is already completed, no more break action is needed.
+    // If both breaks are completed, no more break action is needed.
     if ((hasBreakStart && hasBreakEnd) && (hasShortStart && hasShortEnd)) {
       return [];
     }
 
-    // Safe fallback.
-    return ["breakStart", "shortBreakStart", "breakEnd", "shortBreakEnd"];
+    // Safe fallback: Start buttons only. Never expose End buttons without matching Start.
+    const actions = [];
+    if (!hasBreakStart && !hasBreakEnd) actions.push("breakStart");
+    if (hasBreakStart && !hasBreakEnd) actions.push("breakEnd");
+    if (!hasShortStart && !hasShortEnd) actions.push("shortBreakStart");
+    if (hasShortStart && !hasShortEnd) actions.push("shortBreakEnd");
+    return actions;
   }
 
   function actionInstruction(rec, visibleKeys) {
     if (!visibleKeys.length) return "Break records completed for today.";
     if (visibleKeys.length === 1 && visibleKeys[0] === "breakEnd") return "Break Start recorded. Only Break End is available.";
     if (visibleKeys.length === 1 && visibleKeys[0] === "shortBreakEnd") return "Short Break Start recorded. Only Short Break End is available.";
-    if (visibleKeys.includes("shortBreakStart") && visibleKeys.includes("shortBreakEnd") && !visibleKeys.includes("breakStart")) return "Main break completed. Short break options are available.";
-    return "Select the correct break action.";
+    if (visibleKeys.length === 1 && visibleKeys[0] === "shortBreakStart") return "Main break completed. Only Short Break Start is available.";
+    if (visibleKeys.length === 1 && visibleKeys[0] === "breakStart") return "Short break completed. Only Break Start is available.";
+    return "Select Break Start or Short Break Start.";
   }
 
   function showEmp(emp) {
