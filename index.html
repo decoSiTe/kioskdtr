@@ -318,6 +318,16 @@
       gap:10px;
     }
 
+    .grid2.single-action{
+      grid-template-columns:1fr;
+      justify-items:center;
+    }
+
+    .grid2.single-action .abtn{
+      width:58%;
+      min-width:220px;
+    }
+
     .abtn{
       min-height:58px;
       padding:14px 10px;
@@ -432,6 +442,7 @@
       .header h1{font-size:22px;}
       .card{padding:16px;}
       .grid2{gap:8px;}
+      .grid2.single-action .abtn{width:100%;min-width:0;}
       .abtn{font-size:12px;min-height:54px;padding:12px 8px;}
     }
   </style>
@@ -620,7 +631,11 @@
   }
 
   function setVisibleActions(visibleKeys) {
-    const visible = new Set(visibleKeys || []);
+    visibleKeys = visibleKeys || [];
+    const visible = new Set(visibleKeys);
+    const grid = document.querySelector(".grid2");
+    if (grid) grid.classList.toggle("single-action", visibleKeys.length === 1);
+
     document.querySelectorAll(".abtn").forEach(function(btn) {
       const isVisible = visible.has(btn.dataset.a);
       btn.classList.toggle("hidden-action", !isVisible);
