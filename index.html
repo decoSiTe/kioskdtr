@@ -404,6 +404,7 @@
     .toast.warn{border-color:var(--orange);color:#ffd166;box-shadow:0 0 18px rgba(255,153,0,.22);}
 
     .hidden{display:none!important;}
+    .hidden-action{display:none!important;}
 
     #reader{
       border-radius:0;
@@ -614,6 +615,67 @@
       String(rec.lastAction || "").trim().toLowerCase() === "departure";
   }
 
+  function hasValue(value) {
+    return String(value || "").trim() !== "";
+  }
+
+  function setVisibleActions(visibleKeys) {
+    const visible = new Set(visibleKeys || []);
+    document.querySelectorAll(".abtn").forEach(function(btn) {
+      const isVisible = visible.has(btn.dataset.a);
+      btn.classList.toggle("hidden-action", !isVisible);
+      if (!isVisible) btn.disabled = true;
+    });
+  }
+
+  function getNextVisibleActions(rec) {
+    const hasBreakStart = hasValue(rec.breakStart);
+    const hasBreakEnd = hasValue(rec.breakEnd);
+    const hasShortStart = hasValue(rec.shortBreakStart);
+    const hasShortEnd = hasValue(rec.shortBreakEnd);
+
+    // First scan of the day: show all 4 break buttons.
+    if (!hasBreakStart && !hasBreakEnd && !hasShortStart && !hasShortEnd) {
+      return ["breakStart", "shortBreakStart", "breakEnd", "shortBreakEnd"];
+    }
+
+    // Main break already started: next scan must only allow Break End.
+    if (hasBreakStart && !hasBreakEnd) {
+      return ["breakEnd"];
+    }
+
+    // Short break already started: next scan must only allow Short Break End.
+    if (hasShortStart && !hasShortEnd) {
+      return ["shortBreakEnd"];
+    }
+
+    // Main break completed: next scan only shows short break options.
+    if ((hasBreakStart && hasBreakEnd) && !hasShortStart && !hasShortEnd) {
+      return ["shortBreakStart", "shortBreakEnd"];
+    }
+
+    // If data was saved with Break End only, continue to short break options.
+    if (!hasBreakStart && hasBreakEnd && !hasShortStart && !hasShortEnd) {
+      return ["shortBreakStart", "shortBreakEnd"];
+    }
+
+    // If everything is already completed, no more break action is needed.
+    if ((hasBreakStart && hasBreakEnd) && (hasShortStart && hasShortEnd)) {
+      return [];
+    }
+
+    // Safe fallback.
+    return ["breakStart", "shortBreakStart", "breakEnd", "shortBreakEnd"];
+  }
+
+  function actionInstruction(rec, visibleKeys) {
+    if (!visibleKeys.length) return "Break records completed for today.";
+    if (visibleKeys.length === 1 && visibleKeys[0] === "breakEnd") return "Break Start recorded. Only Break End is available.";
+    if (visibleKeys.length === 1 && visibleKeys[0] === "shortBreakEnd") return "Short Break Start recorded. Only Short Break End is available.";
+    if (visibleKeys.includes("shortBreakStart") && visibleKeys.includes("shortBreakEnd") && !visibleKeys.includes("breakStart")) return "Main break completed. Short break options are available.";
+    return "Select the correct break action.";
+  }
+
   function showEmp(emp) {
     currentEmp = emp;
     document.getElementById("eName").textContent = emp.name;
@@ -623,6 +685,8 @@
     const rec = todayRecords[String(emp.code).toUpperCase()] || {};
     const departedTime = String(rec.departure || "").trim();
     const alreadyDeparted = isDepartureRecorded(rec);
+    const visibleKeys = alreadyDeparted ? [] : getNextVisibleActions(rec);
+    setVisibleActions(visibleKeys);
 
     document.querySelectorAll(".abtn").forEach(function(btn) {
       const actionKey = btn.dataset.a;
@@ -637,14 +701,26 @@
         return;
       }
 
+      if (!visibleKeys.includes(actionKey)) {
+        btn.disabled = true;
+        return;
+      }
+
       btn.disabled = false;
       btn.title = "";
     });
+
+    const note = document.querySelector(".note");
+    if (note) note.textContent = alreadyDeparted
+      ? "Attendance completed for today."
+      : actionInstruction(rec, visibleKeys);
 
     show("actCard",true);
 
     if (alreadyDeparted) {
       toast("⚠️ " + emp.name + " already departed" + (departedTime ? " at " + departedTime : "") + ". Attendance completed for today.", "warn");
+    } else if (!visibleKeys.length) {
+      toast("✓ " + emp.name + " break records completed for today.", "ok");
     } else {
       hideToast();
     }
@@ -689,6 +765,7 @@
   });
 
   function lockDepartedEmployee(emp, departedTime) {
+    setVisibleActions([]);
     document.querySelectorAll(".abtn").forEach(function(btn) {
       btn.disabled = true;
       btn.classList.add("locked");
@@ -711,6 +788,11 @@
     todayRecords[codeKey][key] = time;
     const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
+
+    const updatedVisibleKeys = getNextVisibleActions(todayRecords[codeKey]);
+    setVisibleActions(updatedVisibleKeys);
+    const note = document.querySelector(".note");
+    if (note) note.textContent = actionInstruction(todayRecords[codeKey], updatedVisibleKeys);
 
     const payload = {
       type:"attendance", date, timestamp:ts,
