@@ -630,6 +630,46 @@
     return String(value || "").trim() !== "";
   }
 
+  function timeTextToMinutes(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const match = text.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (!match) return null;
+    const h = Number(match[1]);
+    const m = Number(match[2]);
+    if (Number.isNaN(h) || Number.isNaN(m)) return null;
+    return h * 60 + m;
+  }
+
+  function currentMinutes() {
+    const n = new Date();
+    return n.getHours() * 60 + n.getMinutes();
+  }
+
+  function isEarlyMorningTime(value) {
+    const mins = timeTextToMinutes(value);
+    return mins !== null && mins <= (12 * 60);
+  }
+
+  function isEveningNewShiftNow() {
+    return currentMinutes() >= (18 * 60);
+  }
+
+  function cleanStaleNightShiftEnds(rec) {
+    const cleaned = Object.assign({}, rec || {});
+
+    // Night-shift rule:
+    // A Break End saved after midnight belongs to the previous shift.
+    // When the same employee returns in the evening for the new shift,
+    // do not let that 00:xx End force Short Break options.
+    if (isEveningNewShiftNow()) {
+      if (!hasValue(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd)) cleaned.breakEnd = "";
+      if (!hasValue(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd)) cleaned.shortBreakEnd = "";
+    }
+
+    return cleaned;
+  }
+
   function setVisibleActions(visibleKeys) {
     visibleKeys = visibleKeys || [];
     const visible = new Set(visibleKeys);
@@ -718,7 +758,9 @@
     document.getElementById("eMeta").textContent =
       emp.code + " · " + (emp.department||"") + " · " + (emp.position||"");
 
-    const rec = todayRecords[String(emp.code).toUpperCase()] || {};
+    const codeKey = String(emp.code).toUpperCase();
+    const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {});
+    todayRecords[codeKey] = rec;
     const departedTime = String(rec.departure || "").trim();
     const alreadyDeparted = isDepartureRecorded(rec);
     const visibleKeys = alreadyDeparted ? [] : getNextVisibleActions(rec);
@@ -786,7 +828,8 @@
       if (isSending || b.disabled) return;
 
       const codeKey = currentEmp ? String(currentEmp.code).toUpperCase() : "";
-      const rec = todayRecords[codeKey] || {};
+      const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {});
+      todayRecords[codeKey] = rec;
       if (isDepartureRecorded(rec)) {
         lockDepartedEmployee(currentEmp, rec.departure || "");
         return;
@@ -821,6 +864,7 @@
 
     const codeKey = String(emp.code).toUpperCase();
     if (!todayRecords[codeKey]) todayRecords[codeKey] = {};
+    todayRecords[codeKey] = cleanStaleNightShiftEnds(todayRecords[codeKey]);
     todayRecords[codeKey][key] = time;
     const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
