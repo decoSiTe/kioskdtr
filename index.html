@@ -696,6 +696,19 @@
         cleaned.shortBreakEnd = "";
       }
 
+      // Short breaks taken after midnight, like 04:40 → 05:08, belong to the
+      // previous night shift. At the next evening shift they must not block
+      // Short Break Start from showing again.
+      if (isEarlyMorningTime(cleaned.breakStart) && (!hasValue(cleaned.breakEnd) || isEarlyMorningTime(cleaned.breakEnd))) {
+        cleaned.breakStart = "";
+        cleaned.breakEnd = "";
+      }
+
+      if (isEarlyMorningTime(cleaned.shortBreakStart) && (!hasValue(cleaned.shortBreakEnd) || isEarlyMorningTime(cleaned.shortBreakEnd))) {
+        cleaned.shortBreakStart = "";
+        cleaned.shortBreakEnd = "";
+      }
+
       if (!hasValue(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd)) cleaned.breakEnd = "";
       if (!hasValue(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd)) cleaned.shortBreakEnd = "";
       if (isEarlyMorningTime(cleaned.departure)) cleaned.departure = "";
