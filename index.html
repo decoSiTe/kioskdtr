@@ -515,6 +515,7 @@
     d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
 
   const EMP_CACHE_KEY = "kioskdtr_employee_cache_v3";
+  const EMP_CACHE_MAX_AGE_MS = 2 * 60 * 1000; // do not keep old break state all day
 
   function applyEmployeeData(data) {
     employees = data.employees || [];
@@ -546,7 +547,15 @@
       if (!raw) return false;
       const cached = JSON.parse(raw);
       if (!cached || cached.date !== fmt()) return false;
-      applyEmployeeData(cached);
+
+      // Employees can be reused from cache for fast startup.
+      // Today records are used only when the cache is fresh, so yesterday-night
+      // break state will not control the new afternoon shift in the evening.
+      const freshRecords = (Date.now() - Number(cached.savedAt || 0)) <= EMP_CACHE_MAX_AGE_MS;
+      applyEmployeeData({
+        employees: cached.employees || [],
+        todayRecords: freshRecords ? (cached.todayRecords || []) : []
+      });
       return employees.length > 0;
     } catch (_) {
       return false;
@@ -651,20 +660,45 @@
     return mins !== null && mins <= (12 * 60);
   }
 
+  function isEveningTime(value) {
+    const mins = timeTextToMinutes(value);
+    return mins !== null && mins >= (18 * 60);
+  }
+
+  function isAfternoonEmployee(emp) {
+    return String((emp && emp.shift) || "").trim().toLowerCase() === "afternoon";
+  }
+
   function isEveningNewShiftNow() {
     return currentMinutes() >= (18 * 60);
   }
 
-  function cleanStaleNightShiftEnds(rec) {
+  function cleanStaleNightShiftEnds(rec, emp) {
     const cleaned = Object.assign({}, rec || {});
 
-    // Night-shift rule:
-    // A Break End saved after midnight belongs to the previous shift.
-    // When the same employee returns in the evening for the new shift,
-    // do not let that 00:xx End force Short Break options.
-    if (isEveningNewShiftNow()) {
+    // Afternoon shift rule:
+    // A break that starts before midnight and ends after midnight belongs to the
+    // previous shift date. When the employee returns in the evening for the next
+    // shift, do not let the old 00:xx End or completed cross-midnight break force
+    // Short Break options.
+    if (isEveningNewShiftNow() && isAfternoonEmployee(emp)) {
+      if (cleaned.previousNight) {
+        return { code: cleaned.code || (emp && emp.code) || "" };
+      }
+
+      if (isEveningTime(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd)) {
+        cleaned.breakStart = "";
+        cleaned.breakEnd = "";
+      }
+
+      if (isEveningTime(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd)) {
+        cleaned.shortBreakStart = "";
+        cleaned.shortBreakEnd = "";
+      }
+
       if (!hasValue(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd)) cleaned.breakEnd = "";
       if (!hasValue(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd)) cleaned.shortBreakEnd = "";
+      if (isEarlyMorningTime(cleaned.departure)) cleaned.departure = "";
     }
 
     return cleaned;
@@ -759,7 +793,7 @@
       emp.code + " · " + (emp.department||"") + " · " + (emp.position||"");
 
     const codeKey = String(emp.code).toUpperCase();
-    const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {});
+    const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {}, emp);
     todayRecords[codeKey] = rec;
     const departedTime = String(rec.departure || "").trim();
     const alreadyDeparted = isDepartureRecorded(rec);
@@ -828,7 +862,7 @@
       if (isSending || b.disabled) return;
 
       const codeKey = currentEmp ? String(currentEmp.code).toUpperCase() : "";
-      const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {});
+      const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {}, currentEmp);
       todayRecords[codeKey] = rec;
       if (isDepartureRecorded(rec)) {
         lockDepartedEmployee(currentEmp, rec.departure || "");
@@ -864,7 +898,7 @@
 
     const codeKey = String(emp.code).toUpperCase();
     if (!todayRecords[codeKey]) todayRecords[codeKey] = {};
-    todayRecords[codeKey] = cleanStaleNightShiftEnds(todayRecords[codeKey]);
+    todayRecords[codeKey] = cleanStaleNightShiftEnds(todayRecords[codeKey], emp);
     todayRecords[codeKey][key] = time;
     const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
