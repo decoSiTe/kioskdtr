@@ -688,6 +688,18 @@
     // still need an End button. Completed previous-night breaks must not make
     // the kiosk say "Break records completed for today" on the new calendar day.
     if (cleaned.previousNight) {
+      const isBeforeNoon = currentMinutes() <= (12 * 60);
+
+      // Before noon, continue the previous afternoon/night-shift row.
+      // Example: July 3 Break Start 23:30, Break End July 4 00:30,
+      // then Short Break Start July 4 04:30 must still belong to July 3.
+      // Keep completed main-break values so the kiosk can show Short Break Start next.
+      if (isBeforeNoon) {
+        return cleaned;
+      }
+
+      // After noon/evening, previous-night completed break records must not block
+      // the new shift. Keep only genuinely open breaks that still need an End button.
       const open = { code: cleaned.code || (emp && emp.code) || "", previousNight: true };
       if (hasValue(cleaned.breakStart) && !hasValue(cleaned.breakEnd)) open.breakStart = cleaned.breakStart;
       if (hasValue(cleaned.shortBreakStart) && !hasValue(cleaned.shortBreakEnd)) open.shortBreakStart = cleaned.shortBreakStart;
