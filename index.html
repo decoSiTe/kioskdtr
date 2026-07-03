@@ -514,7 +514,7 @@
   const fmtT = (d=new Date()) =>
     d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v3";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v4";
   const EMP_CACHE_MAX_AGE_MS = 2 * 60 * 1000; // do not keep old break state all day
 
   function applyEmployeeData(data) {
@@ -673,42 +673,49 @@
     return currentMinutes() >= (18 * 60);
   }
 
+  function isAfterNightShiftResetTime() {
+    // After 7:00 AM, completed early-morning break records belong to the
+    // previous night shift and must not block today's new break choices.
+    return currentMinutes() >= (7 * 60);
+  }
+
   function cleanStaleNightShiftEnds(rec, emp) {
     const cleaned = Object.assign({}, rec || {});
 
-    // Afternoon shift rule:
-    // A break that starts before midnight and ends after midnight belongs to the
-    // previous shift date. When the employee returns in the evening for the next
-    // shift, do not let the old 00:xx End or completed cross-midnight break force
-    // Short Break options.
-    if (isEveningNewShiftNow() && isAfternoonEmployee(emp)) {
-      if (cleaned.previousNight) {
-        return { code: cleaned.code || (emp && emp.code) || "" };
-      }
+    if (!isAfternoonEmployee(emp)) return cleaned;
 
-      if (isEveningTime(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd)) {
+    // If Apps Script sends a previous-night state, keep ONLY open breaks that
+    // still need an End button. Completed previous-night breaks must not make
+    // the kiosk say "Break records completed for today" on the new calendar day.
+    if (cleaned.previousNight) {
+      const open = { code: cleaned.code || (emp && emp.code) || "", previousNight: true };
+      if (hasValue(cleaned.breakStart) && !hasValue(cleaned.breakEnd)) open.breakStart = cleaned.breakStart;
+      if (hasValue(cleaned.shortBreakStart) && !hasValue(cleaned.shortBreakEnd)) open.shortBreakStart = cleaned.shortBreakStart;
+      return open;
+    }
+
+    // Afternoon/night-shift reset rule:
+    // When completed break pairs are recorded with early-morning times
+    // (example: Short Break Start 04:42, Short Break End 04:50), those belong
+    // to the previous night shift date. After 7:00 AM they must not block the
+    // employee from starting a new Break or Short Break for the new work date.
+    const shouldResetCompletedNightBreaks = isAfterNightShiftResetTime() || isEveningNewShiftNow();
+    if (shouldResetCompletedNightBreaks) {
+      const mainBreakCompletedEarly = isEarlyMorningTime(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd);
+      const shortBreakCompletedEarly = isEarlyMorningTime(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd);
+      const mainBreakCompletedCrossMidnight = isEveningTime(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd);
+      const shortBreakCompletedCrossMidnight = isEveningTime(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd);
+
+      if (mainBreakCompletedEarly || mainBreakCompletedCrossMidnight) {
         cleaned.breakStart = "";
         cleaned.breakEnd = "";
       }
-
-      if (isEveningTime(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd)) {
+      if (shortBreakCompletedEarly || shortBreakCompletedCrossMidnight) {
         cleaned.shortBreakStart = "";
         cleaned.shortBreakEnd = "";
       }
 
-      // Short breaks taken after midnight, like 04:40 → 05:08, belong to the
-      // previous night shift. At the next evening shift they must not block
-      // Short Break Start from showing again.
-      if (isEarlyMorningTime(cleaned.breakStart) && (!hasValue(cleaned.breakEnd) || isEarlyMorningTime(cleaned.breakEnd))) {
-        cleaned.breakStart = "";
-        cleaned.breakEnd = "";
-      }
-
-      if (isEarlyMorningTime(cleaned.shortBreakStart) && (!hasValue(cleaned.shortBreakEnd) || isEarlyMorningTime(cleaned.shortBreakEnd))) {
-        cleaned.shortBreakStart = "";
-        cleaned.shortBreakEnd = "";
-      }
-
+      // End-only values after midnight are old/stale and must not expose a completed state.
       if (!hasValue(cleaned.breakStart) && isEarlyMorningTime(cleaned.breakEnd)) cleaned.breakEnd = "";
       if (!hasValue(cleaned.shortBreakStart) && isEarlyMorningTime(cleaned.shortBreakEnd)) cleaned.shortBreakEnd = "";
       if (isEarlyMorningTime(cleaned.departure)) cleaned.departure = "";
