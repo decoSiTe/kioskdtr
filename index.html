@@ -747,22 +747,37 @@
     return 19 * 60;
   }
 
+  function getNightShiftEndMinutes(emp, rec) {
+    // Schedule end for afternoon/night shift:
+    // 8 hours  = 7:00 PM to 4:00 AM
+    // 12 hours = 7:00 PM to 7:00 AM
+    const hours = getScheduledHours(emp, rec);
+    if (hours === 8) return 4 * 60;
+    if (hours === 12) return 7 * 60;
+    // If schedule is missing/unclear, use the safer 12-hour night-shift end.
+    return 7 * 60;
+  }
+
   function isNightShiftClosedUntilEvening(emp, rec, mainOpen, shortOpen, mainDone, shortDone, shortAllowed) {
     if (!isNightShiftEmployee(emp)) return false;
     if (mainOpen || shortOpen) return false;
 
     const nowMins = currentMinutes();
+    const shiftEndMins = getNightShiftEndMinutes(emp, rec);
+    const shiftStartMins = getNightShiftStartMinutes();
 
-    // Previous-night record is still allowed before noon only when there is a remaining break action.
-    // If all allowed breaks are completed, no more break button should show until 7:00 PM.
+    // Previous-night record can continue only while the night-shift schedule is still active.
+    // Example 12-hour night shift: after 7:00 AM, do not show Short Break Start even if it was unused.
     if (rec && rec.previousNight) {
+      if (nowMins >= shiftEndMins) return true;
       const completedAllAllowedBreaks = mainDone && (!shortAllowed || shortDone);
       return completedAllAllowedBreaks;
     }
 
-    // For night/afternoon shift, do not start a new break before the actual 7:00 PM shift start.
-    // This also covers employees who did not use Break or Short Break on the previous night shift.
-    return nowMins < getNightShiftStartMinutes();
+    // For night/afternoon shift, allow break buttons only during the active shift window:
+    // 7:00 PM → 4:00 AM for 8 hrs, or 7:00 PM → 7:00 AM for 12 hrs.
+    // After the schedule finishes, keep buttons hidden until the next 7:00 PM shift starts.
+    return nowMins >= shiftEndMins && nowMins < shiftStartMins;
   }
 
   function isEveningNewShiftNow() {
@@ -901,7 +916,7 @@
     if (!visibleKeys.length) {
       if (isNightShiftEmployee(emp)) {
         if (mainDone && (!shortAllowed || shortDone)) return "Break records completed. Next break is available when the next night shift starts.";
-        return "No break action available before night shift starts.";
+        return "Duty schedule is finished. Next break is available when the next night shift starts.";
       }
       if (!shortAllowed && mainDone) return "Main break completed. Short break is only for 12-hour schedule.";
       return "Break records completed for today.";
@@ -959,7 +974,7 @@
     if (alreadyDeparted) {
       toast("⚠️ " + emp.name + " already departed" + (departedTime ? " at " + departedTime : "") + ". Attendance completed for today.", "warn");
     } else if (!visibleKeys.length) {
-      toast("✓ " + emp.name + " break records completed for today.", "ok");
+      toast(actionInstruction(rec, visibleKeys, emp), isNightShiftEmployee(emp) ? "warn" : "ok");
     } else {
       hideToast();
     }
