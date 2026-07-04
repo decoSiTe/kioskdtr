@@ -715,26 +715,45 @@
     if (!schedule) return null;
 
     const aliases = dayAliasesFromIso(currentShiftDateForSchedule(emp, rec));
-    const regex = /(MONDAY|MON|M|TUESDAY|TUE|T|WEDNESDAY|WED|W|THURSDAY|THU|TH|FRIDAY|FRI|F|SATURDAY|SAT|SA|SUNDAY|SUN|SU)\s*[:=\-]?\s*(8|12)\s*(?:HRS?|HOURS?)?/g;
-    let match;
-    const found = [];
 
-    while ((match = regex.exec(schedule)) !== null) {
+    // Day-specific schedule parser.
+    // If today's day is marked OFF / DAY OFF, or if the schedule has day entries
+    // but today's day is missing, treat it as Day Off and hide all break buttons.
+    const dayEntryRegex = /(MONDAY|MON|M|TUESDAY|TUE|T|WEDNESDAY|WED|W|THURSDAY|THU|TH|FRIDAY|FRI|F|SATURDAY|SAT|SA|SUNDAY|SUN|SU)\s*[:=\-]?\s*(8|12|0|OFF|DAY\s*OFF|REST|REST\s*DAY)\s*(?:HRS?|HOURS?)?/g;
+    let match;
+    let hasDayEntries = false;
+
+    while ((match = dayEntryRegex.exec(schedule)) !== null) {
+      hasDayEntries = true;
       const day = match[1];
-      const hrs = Number(match[2]);
-      if (aliases.includes(day)) return hrs;
-      found.push(hrs);
+      const value = String(match[2] || "").replace(/\s+/g, " ").trim();
+
+      if (aliases.includes(day)) {
+        if (/^(OFF|DAY OFF|REST|REST DAY|0)$/.test(value)) return 0;
+        return Number(value);
+      }
     }
 
-    // Fallback for simple schedule text like "12 hours" or "8 hrs".
-    const simple = schedule.match(/\b(8|12)\s*(?:HRS?|HOURS?)\b/);
-    if (simple) return Number(simple[1]);
+    // Fallback for old/simple schedule text like "12 hours" or "8 hrs".
+    // Only use this when there are no day-specific entries.
+    if (!hasDayEntries) {
+      const simple = schedule.match(/\b(8|12)\s*(?:HRS?|HOURS?)\b/);
+      if (simple) return Number(simple[1]);
+    }
 
-    return found.length === 1 ? found[0] : null;
+    // Schedule has entries for some days, but not this day = Day Off.
+    if (hasDayEntries) return 0;
+
+    return null;
+  }
+
+  function isDayOffScheduled(emp, rec) {
+    return getScheduledHours(emp, rec) === 0;
   }
 
   function isShortBreakAllowed(emp, rec) {
     const hours = getScheduledHours(emp, rec);
+    if (hours === 0) return false;
     if (hours === 8) return false;
     if (hours === 12) return true;
     // If no schedule is saved, keep old behavior so existing employees still work.
@@ -863,6 +882,8 @@
   function getNextVisibleActions(rec, emp) {
     rec = rec || {};
 
+    if (isDayOffScheduled(emp, rec)) return [];
+
     const shortAllowed = isShortBreakAllowed(emp, rec);
 
     const hasBreakStart = hasValue(rec.breakStart);
@@ -914,6 +935,7 @@
     const shortDone = hasShortStart && hasShortEnd;
 
     if (!visibleKeys.length) {
+      if (isDayOffScheduled(emp, rec || {})) return "Day off. Break buttons are not available.";
       if (isNightShiftEmployee(emp)) {
         if (mainDone && (!shortAllowed || shortDone)) return "Break records completed. Next break is available when the next night shift starts.";
         return "Duty schedule is finished. Next break is available when the next night shift starts.";
@@ -1041,6 +1063,13 @@
     const codeKey = String(emp.code).toUpperCase();
     if (!todayRecords[codeKey]) todayRecords[codeKey] = {};
     todayRecords[codeKey] = cleanStaleNightShiftEnds(todayRecords[codeKey], emp);
+
+    if (isDayOffScheduled(emp, todayRecords[codeKey])) {
+      toast("⚠️ Day off. Break buttons are not available.", "warn");
+      isSending = false;
+      return;
+    }
+
     todayRecords[codeKey][key] = time;
     const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
