@@ -741,6 +741,12 @@
     return true;
   }
 
+  function getNightShiftStartMinutes() {
+    // Afternoon/night shift starts at 7:00 PM.
+    // Before this time, do not show new break buttons after the previous shift is finished.
+    return 19 * 60;
+  }
+
   function isNightShiftClosedUntilEvening(emp, rec, mainOpen, shortOpen, mainDone, shortDone, shortAllowed) {
     if (!isNightShiftEmployee(emp)) return false;
     if (mainOpen || shortOpen) return false;
@@ -754,13 +760,13 @@
       return completedAllAllowedBreaks;
     }
 
-    // For night/afternoon shift, do not start a new break in the morning/day time.
-    // New break choices open when they come back for the next shift at night.
-    return nowMins < (18 * 60);
+    // For night/afternoon shift, do not start a new break before the actual 7:00 PM shift start.
+    // This also covers employees who did not use Break or Short Break on the previous night shift.
+    return nowMins < getNightShiftStartMinutes();
   }
 
   function isEveningNewShiftNow() {
-    return currentMinutes() >= (18 * 60);
+    return currentMinutes() >= getNightShiftStartMinutes();
   }
 
   function isAfterNightShiftResetTime() {
