@@ -514,8 +514,8 @@
   const fmtT = (d=new Date()) =>
     d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v4";
-  const EMP_CACHE_MAX_AGE_MS = 2 * 60 * 1000; // do not keep old break state all day
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v7";
+  const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function applyEmployeeData(data) {
     employees = data.employees || [];
@@ -665,8 +665,91 @@
     return mins !== null && mins >= (18 * 60);
   }
 
+  function normalizeShiftText(value) {
+    return String(value || "").trim().toLowerCase();
+  }
+
+  function isNightShiftEmployee(emp) {
+    const shift = normalizeShiftText((emp && emp.shift) || "");
+    // Accept your existing values: Afternoon, Night, Night Shift, Evening, PM.
+    return /afternoon|night|evening|pm/.test(shift);
+  }
+
   function isAfternoonEmployee(emp) {
-    return String((emp && emp.shift) || "").trim().toLowerCase() === "afternoon";
+    return isNightShiftEmployee(emp);
+  }
+
+  function currentShiftDateForSchedule(emp, rec) {
+    if (rec && rec.date) return rec.date;
+    const now = new Date();
+    if (isNightShiftEmployee(emp) && currentMinutes() < (12 * 60)) {
+      now.setDate(now.getDate() - 1);
+    }
+    return fmt(now);
+  }
+
+  function dayAliasesFromIso(isoDate) {
+    const parts = String(isoDate || fmt()).split("-").map(Number);
+    const d = new Date(parts[0] || new Date().getFullYear(), (parts[1] || 1) - 1, parts[2] || new Date().getDate());
+    const days = [
+      ["SUN", "SU", "SUNDAY"],
+      ["MON", "M", "MONDAY"],
+      ["TUE", "T", "TUESDAY"],
+      ["WED", "W", "WEDNESDAY"],
+      ["THU", "TH", "THURSDAY"],
+      ["FRI", "F", "FRIDAY"],
+      ["SAT", "SA", "SATURDAY"]
+    ];
+    return days[d.getDay()];
+  }
+
+  function getScheduledHours(emp, rec) {
+    const schedule = String((emp && emp.schedule) || "").toUpperCase();
+    if (!schedule) return null;
+
+    const aliases = dayAliasesFromIso(currentShiftDateForSchedule(emp, rec));
+    const regex = /(MONDAY|MON|M|TUESDAY|TUE|T|WEDNESDAY|WED|W|THURSDAY|THU|TH|FRIDAY|FRI|F|SATURDAY|SAT|SA|SUNDAY|SUN|SU)\s*[:=\-]?\s*(8|12)\s*(?:HRS?|HOURS?)?/g;
+    let match;
+    const found = [];
+
+    while ((match = regex.exec(schedule)) !== null) {
+      const day = match[1];
+      const hrs = Number(match[2]);
+      if (aliases.includes(day)) return hrs;
+      found.push(hrs);
+    }
+
+    // Fallback for simple schedule text like "12 hours" or "8 hrs".
+    const simple = schedule.match(/\b(8|12)\s*(?:HRS?|HOURS?)\b/);
+    if (simple) return Number(simple[1]);
+
+    return found.length === 1 ? found[0] : null;
+  }
+
+  function isShortBreakAllowed(emp, rec) {
+    const hours = getScheduledHours(emp, rec);
+    if (hours === 8) return false;
+    if (hours === 12) return true;
+    // If no schedule is saved, keep old behavior so existing employees still work.
+    return true;
+  }
+
+  function isNightShiftClosedUntilEvening(emp, rec, mainOpen, shortOpen, mainDone, shortDone, shortAllowed) {
+    if (!isNightShiftEmployee(emp)) return false;
+    if (mainOpen || shortOpen) return false;
+
+    const nowMins = currentMinutes();
+
+    // Previous-night record is still allowed before noon only when there is a remaining break action.
+    // If all allowed breaks are completed, no more break button should show until 7:00 PM.
+    if (rec && rec.previousNight) {
+      const completedAllAllowedBreaks = mainDone && (!shortAllowed || shortDone);
+      return completedAllAllowedBreaks;
+    }
+
+    // For night/afternoon shift, do not start a new break in the morning/day time.
+    // New break choices open when they come back for the next shift at night.
+    return nowMins < (18 * 60);
   }
 
   function isEveningNewShiftNow() {
@@ -749,73 +832,72 @@
     });
   }
 
-  function getNextVisibleActions(rec) {
+  function getNextVisibleActions(rec, emp) {
+    rec = rec || {};
+
+    const shortAllowed = isShortBreakAllowed(emp, rec);
+
     const hasBreakStart = hasValue(rec.breakStart);
     const hasBreakEnd = hasValue(rec.breakEnd);
-    const hasShortStart = hasValue(rec.shortBreakStart);
-    const hasShortEnd = hasValue(rec.shortBreakEnd);
+    const hasShortStart = shortAllowed && hasValue(rec.shortBreakStart);
+    const hasShortEnd = shortAllowed && hasValue(rec.shortBreakEnd);
 
-    // IMPORTANT:
-    // End buttons must never appear unless their matching Start button was recorded first.
-    // Break End requires Break Start.
-    // Short Break End requires Short Break Start.
+    const mainOpen = hasBreakStart && !hasBreakEnd;
+    const shortOpen = hasShortStart && !hasShortEnd;
+    const mainDone = hasBreakStart && hasBreakEnd;
+    const shortDone = hasShortStart && hasShortEnd;
 
-    // Main break already started: only allow Break End.
-    if (hasBreakStart && !hasBreakEnd) {
-      return ["breakEnd"];
-    }
+    // End buttons must appear only when the matching start is already open.
+    if (mainOpen) return ["breakEnd"];
+    if (shortOpen) return ["shortBreakEnd"];
 
-    // Short break already started: only allow Short Break End.
-    if (hasShortStart && !hasShortEnd) {
-      return ["shortBreakEnd"];
-    }
-
-    // Main break completed, short break not started: only allow Short Break Start.
-    if (hasBreakStart && hasBreakEnd && !hasShortStart && !hasShortEnd) {
-      return ["shortBreakStart"];
-    }
-
-    // Short break completed, main break not started: only allow Break Start.
-    if (!hasBreakStart && !hasBreakEnd && hasShortStart && hasShortEnd) {
-      return ["breakStart"];
-    }
-
-    // Nothing started yet: show only the two Start buttons.
-    // Do not show Break End or Short Break End at this stage.
-    if (!hasBreakStart && !hasBreakEnd && !hasShortStart && !hasShortEnd) {
-      return ["breakStart", "shortBreakStart"];
-    }
-
-    // Old/incorrect data safety:
-    // If an End exists without its Start, do not show that End button again.
-    if (!hasBreakStart && hasBreakEnd && !hasShortStart && !hasShortEnd) {
-      return ["shortBreakStart"];
-    }
-    if (!hasShortStart && hasShortEnd && !hasBreakStart && !hasBreakEnd) {
-      return ["breakStart"];
-    }
-
-    // If both breaks are completed, no more break action is needed.
-    if ((hasBreakStart && hasBreakEnd) && (hasShortStart && hasShortEnd)) {
+    // Night/afternoon shift: completed previous-night breaks must not show
+    // another End button after the short break is already finished.
+    if (isNightShiftClosedUntilEvening(emp, rec, mainOpen, shortOpen, mainDone, shortDone, shortAllowed)) {
       return [];
     }
 
-    // Safe fallback: Start buttons only. Never expose End buttons without matching Start.
+    // 12-hour schedule: main break and short break are available.
+    // 8-hour schedule: only main break is available.
+    if (!hasBreakStart && !hasShortStart) {
+      const starts = ["breakStart"];
+      if (shortAllowed) starts.push("shortBreakStart");
+      return starts;
+    }
+
+    if (mainDone && shortAllowed && !hasShortStart) return ["shortBreakStart"];
+    if (shortDone && !hasBreakStart) return ["breakStart"];
+
+    if (mainDone && (!shortAllowed || shortDone)) return [];
+
     const actions = [];
-    if (!hasBreakStart && !hasBreakEnd) actions.push("breakStart");
-    if (hasBreakStart && !hasBreakEnd) actions.push("breakEnd");
-    if (!hasShortStart && !hasShortEnd) actions.push("shortBreakStart");
-    if (hasShortStart && !hasShortEnd) actions.push("shortBreakEnd");
+    if (!hasBreakStart) actions.push("breakStart");
+    if (shortAllowed && !hasShortStart) actions.push("shortBreakStart");
     return actions;
   }
 
-  function actionInstruction(rec, visibleKeys) {
-    if (!visibleKeys.length) return "Break records completed for today.";
+  function actionInstruction(rec, visibleKeys, emp) {
+    const shortAllowed = isShortBreakAllowed(emp, rec || {});
+    const hasBreakStart = hasValue((rec || {}).breakStart);
+    const hasBreakEnd = hasValue((rec || {}).breakEnd);
+    const hasShortStart = shortAllowed && hasValue((rec || {}).shortBreakStart);
+    const hasShortEnd = shortAllowed && hasValue((rec || {}).shortBreakEnd);
+    const mainDone = hasBreakStart && hasBreakEnd;
+    const shortDone = hasShortStart && hasShortEnd;
+
+    if (!visibleKeys.length) {
+      if (isNightShiftEmployee(emp)) {
+        if (mainDone && (!shortAllowed || shortDone)) return "Break records completed. Next break is available when the next night shift starts.";
+        return "No break action available before night shift starts.";
+      }
+      if (!shortAllowed && mainDone) return "Main break completed. Short break is only for 12-hour schedule.";
+      return "Break records completed for today.";
+    }
     if (visibleKeys.length === 1 && visibleKeys[0] === "breakEnd") return "Break Start recorded. Only Break End is available.";
     if (visibleKeys.length === 1 && visibleKeys[0] === "shortBreakEnd") return "Short Break Start recorded. Only Short Break End is available.";
     if (visibleKeys.length === 1 && visibleKeys[0] === "shortBreakStart") return "Main break completed. Only Short Break Start is available.";
-    if (visibleKeys.length === 1 && visibleKeys[0] === "breakStart") return "Short break completed. Only Break Start is available.";
-    return "Select Break Start or Short Break Start.";
+    if (visibleKeys.length === 1 && visibleKeys[0] === "breakStart") return shortAllowed ? "Short break completed. Only Break Start is available." : "Select Break Start.";
+    return shortAllowed ? "Select Break Start or Short Break Start." : "Select Break Start.";
   }
 
   function showEmp(emp) {
@@ -829,7 +911,7 @@
     todayRecords[codeKey] = rec;
     const departedTime = String(rec.departure || "").trim();
     const alreadyDeparted = isDepartureRecorded(rec);
-    const visibleKeys = alreadyDeparted ? [] : getNextVisibleActions(rec);
+    const visibleKeys = alreadyDeparted ? [] : getNextVisibleActions(rec, emp);
     setVisibleActions(visibleKeys);
 
     document.querySelectorAll(".abtn").forEach(function(btn) {
@@ -857,7 +939,7 @@
     const note = document.querySelector(".note");
     if (note) note.textContent = alreadyDeparted
       ? "Attendance completed for today."
-      : actionInstruction(rec, visibleKeys);
+      : actionInstruction(rec, visibleKeys, emp);
 
     show("actCard",true);
 
@@ -935,10 +1017,10 @@
     const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
 
-    const updatedVisibleKeys = getNextVisibleActions(todayRecords[codeKey]);
+    const updatedVisibleKeys = getNextVisibleActions(todayRecords[codeKey], emp);
     setVisibleActions(updatedVisibleKeys);
     const note = document.querySelector(".note");
-    if (note) note.textContent = actionInstruction(todayRecords[codeKey], updatedVisibleKeys);
+    if (note) note.textContent = actionInstruction(todayRecords[codeKey], updatedVisibleKeys, emp);
 
     const payload = {
       type:"attendance", date, timestamp:ts,
