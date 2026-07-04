@@ -499,6 +499,7 @@
   let isSending = false;
   let todayRecords = {};
   const QUICK_RESET_MS = 350;
+  const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
 
   // Clock
   function tick() {
@@ -621,6 +622,12 @@
     }
   }
   loadEmps(false);
+
+  // Auto-refresh kiosk data every 1 minute to get the latest Google Sheet records.
+  // This only syncs the data in the background; it does not change the kiosk flow.
+  setInterval(function() {
+    if (!isSending) loadEmps(true);
+  }, AUTO_REFRESH_MS);
 
   // ── Live employee lookup ──────────────────────────────────────────────────
   document.getElementById("empIn").addEventListener("input", function(e) {
