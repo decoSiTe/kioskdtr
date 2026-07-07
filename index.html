@@ -500,6 +500,7 @@
   let todayRecords = {};
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
+  const MIN_BREAK_END_MINUTES = 15; // hide end buttons until break is at least 15 minutes
 
   // Clock
   function tick() {
@@ -662,6 +663,19 @@
     return n.getHours() * 60 + n.getMinutes();
   }
 
+  function minutesSinceTime(startValue) {
+    const start = timeTextToMinutes(startValue);
+    if (start === null) return null;
+    let now = currentMinutes();
+    if (now < start) now += 24 * 60;
+    return now - start;
+  }
+
+  function isBreakEndTooSoon(startValue) {
+    const elapsed = minutesSinceTime(startValue);
+    return elapsed !== null && elapsed < MIN_BREAK_END_MINUTES;
+  }
+
   function isEarlyMorningTime(value) {
     const mins = timeTextToMinutes(value);
     return mins !== null && mins <= (12 * 60);
@@ -777,6 +791,21 @@
     return 7 * 60;
   }
 
+  function getMorningShiftEndMinutes(emp, rec) {
+    // Morning shift schedule end:
+    // 8 hours  = 7:00 AM to 4:00 PM
+    // 12 hours = 7:00 AM to 7:00 PM
+    const hours = getScheduledHours(emp, rec);
+    if (hours === 12) return 19 * 60;
+    return 16 * 60;
+  }
+
+  function isMorningShiftDutyFinished(emp, rec) {
+    if (isNightShiftEmployee(emp)) return false;
+    if (isDayOffScheduled(emp, rec || {})) return false;
+    return currentMinutes() >= getMorningShiftEndMinutes(emp, rec || {});
+  }
+
   function isNightShiftClosedUntilEvening(emp, rec, mainOpen, shortOpen, mainDone, shortDone, shortAllowed) {
     if (!isNightShiftEmployee(emp)) return false;
     if (mainOpen || shortOpen) return false;
@@ -883,6 +912,7 @@
     rec = rec || {};
 
     if (isDayOffScheduled(emp, rec)) return [];
+    if (isMorningShiftDutyFinished(emp, rec)) return [];
 
     const shortAllowed = isShortBreakAllowed(emp, rec);
 
@@ -896,9 +926,10 @@
     const mainDone = hasBreakStart && hasBreakEnd;
     const shortDone = hasShortStart && hasShortEnd;
 
-    // End buttons must appear only when the matching start is already open.
-    if (mainOpen) return ["breakEnd"];
-    if (shortOpen) return ["shortBreakEnd"];
+    // End buttons must appear only when the matching start is already open
+    // and the break has reached the minimum 15-minute duration.
+    if (mainOpen) return isBreakEndTooSoon(rec.breakStart) ? [] : ["breakEnd"];
+    if (shortOpen) return isBreakEndTooSoon(rec.shortBreakStart) ? [] : ["shortBreakEnd"];
 
     // Night/afternoon shift: completed previous-night breaks must not show
     // another End button after the short break is already finished.
@@ -931,11 +962,18 @@
     const hasBreakEnd = hasValue((rec || {}).breakEnd);
     const hasShortStart = shortAllowed && hasValue((rec || {}).shortBreakStart);
     const hasShortEnd = shortAllowed && hasValue((rec || {}).shortBreakEnd);
+    const mainOpen = hasBreakStart && !hasBreakEnd;
+    const shortOpen = hasShortStart && !hasShortEnd;
     const mainDone = hasBreakStart && hasBreakEnd;
     const shortDone = hasShortStart && hasShortEnd;
 
     if (!visibleKeys.length) {
+      if ((mainOpen && isBreakEndTooSoon((rec || {}).breakStart)) ||
+          (shortOpen && isBreakEndTooSoon((rec || {}).shortBreakStart))) {
+        return "Your Break is Started.";
+      }
       if (isDayOffScheduled(emp, rec || {})) return "Day off. Break buttons are not available.";
+      if (isMorningShiftDutyFinished(emp, rec || {})) return "Duty schedule is finished. Break buttons are not available.";
       if (isNightShiftEmployee(emp)) {
         if (mainDone && (!shortAllowed || shortDone)) return "Break records completed. Next break is available when the next night shift starts.";
         return "Duty schedule is finished. Next break is available when the next night shift starts.";
@@ -1066,6 +1104,12 @@
 
     if (isDayOffScheduled(emp, todayRecords[codeKey])) {
       toast("⚠️ Day off. Break buttons are not available.", "warn");
+      isSending = false;
+      return;
+    }
+
+    if (isMorningShiftDutyFinished(emp, todayRecords[codeKey])) {
+      toast("⚠️ Duty schedule is finished. Break buttons are not available.", "warn");
       isSending = false;
       return;
     }
