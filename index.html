@@ -598,8 +598,36 @@
   function applyEmployeeData(data) {
     employees = data.employees || [];
     todayRecords = {};
+
+    const todayDate = data.date || fmt();
+    const prevDate = data.previousDate || dateOffsetIso(-1);
+
     (data.todayRecords || []).forEach(function(rec) {
-      todayRecords[String(rec.code).toUpperCase()] = rec;
+      const key = String(rec.code || "").toUpperCase();
+      if (!key) return;
+      todayRecords[key] = Object.assign({}, rec, { date: rec.date || todayDate });
+    });
+
+    // Afternoon/night shift records after midnight still belong to the previous work date.
+    // Example: duty starts July 9 at 7:00 PM, breaks at July 10 12:56 AM / 4:50 AM
+    // must be read from the July 9 DTR row while the shift window is still active.
+    (data.previousRecords || []).forEach(function(rec) {
+      const key = String(rec.code || "").toUpperCase();
+      if (!key) return;
+
+      const emp = employees.find(function(x) {
+        return String(x.code || "").toUpperCase() === key;
+      });
+      if (!emp || !isNightShiftEmployee(emp)) return;
+
+      const previousRec = Object.assign({}, rec, {
+        date: rec.date || prevDate,
+        previousNight: true
+      });
+
+      if (shouldUsePreviousNightRecord(previousRec, emp, todayRecords[key])) {
+        todayRecords[key] = previousRec;
+      }
     });
 
     const currentCode = document.getElementById("empIn")?.value.trim().toUpperCase();
@@ -609,13 +637,46 @@
     updateReminderStack();
   }
 
+  function hasOpenBreakRecord(rec) {
+    return !!rec && (
+      (hasValue(rec.breakStart) && !hasValue(rec.breakEnd)) ||
+      (hasValue(rec.shortBreakStart) && !hasValue(rec.shortBreakEnd))
+    );
+  }
+
+  function shouldUsePreviousNightRecord(previousRec, emp, todayRec) {
+    if (!previousRec || !emp || !isNightShiftEmployee(emp)) return false;
+
+    // If yesterday's night-shift row still has an open break, it must control the buttons
+    // until the employee closes that same break.
+    if (hasOpenBreakRecord(previousRec)) return true;
+
+    // While the previous night-shift schedule is still active, use yesterday's row.
+    // This keeps Break End / Short Break End correct for early-morning actions.
+    const nowInWindow = currentMinutesInShiftWindow(emp, previousRec);
+    const shiftEnd = shiftEndMinutesInWindow(emp, previousRec);
+    if (nowInWindow <= shiftEnd) return true;
+
+    // After the previous shift is finished, do not let yesterday's completed row block
+    // today's new night shift. The new shift will open again at 7:00 PM.
+    return false;
+  }
+
+  function dateOffsetIso(days) {
+    const d = new Date();
+    d.setDate(d.getDate() + Number(days || 0));
+    return d.toLocaleDateString("en-CA");
+  }
+
   function saveEmployeeCache(data) {
     try {
       localStorage.setItem(EMP_CACHE_KEY, JSON.stringify({
-        date: fmt(),
+        date: data.date || fmt(),
+        previousDate: data.previousDate || dateOffsetIso(-1),
         savedAt: Date.now(),
         employees: data.employees || [],
-        todayRecords: data.todayRecords || []
+        todayRecords: data.todayRecords || [],
+        previousRecords: data.previousRecords || []
       }));
     } catch (_) {}
   }
@@ -628,12 +689,14 @@
       if (!cached || cached.date !== fmt()) return false;
 
       // Employees can be reused from cache for fast startup.
-      // Today records are used only when the cache is fresh, so yesterday-night
-      // break state will not control the new afternoon shift in the evening.
+      // Records are used only when the cache is fresh, so old break state will not control a new shift.
       const freshRecords = (Date.now() - Number(cached.savedAt || 0)) <= EMP_CACHE_MAX_AGE_MS;
       applyEmployeeData({
+        date: cached.date || fmt(),
+        previousDate: cached.previousDate || dateOffsetIso(-1),
         employees: cached.employees || [],
-        todayRecords: freshRecords ? (cached.todayRecords || []) : []
+        todayRecords: freshRecords ? (cached.todayRecords || []) : [],
+        previousRecords: freshRecords ? (cached.previousRecords || []) : []
       });
       return employees.length > 0;
     } catch (_) {
@@ -641,7 +704,22 @@
     }
   }
 
+
   // ── Load employees from Google Sheets ─────────────────────────────────────
+  async function fetchEmployeesForDate(targetDate) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const r = await fetch(SCRIPT_URL + "?action=getEmployees&date=" + targetDate + "&_=" + Date.now(), {
+        cache: "no-store",
+        signal: controller.signal
+      });
+      return await r.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function loadEmps(silent) {
     // Only skip if URL is literally the placeholder text
     if (!SCRIPT_URL || SCRIPT_URL.trim() === "YOUR_APPS_SCRIPT_URL_HERE") {
@@ -667,17 +745,28 @@
 
     try {
       const today = fmt();
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000);
-      const r = await fetch(SCRIPT_URL + "?action=getEmployees&date=" + today + "&_=" + Date.now(), {
-        cache: "no-store",
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-      const d = await r.json();
+      const previousDate = dateOffsetIso(-1);
+      const needPreviousNight = currentMinutes() < (12 * 60);
 
-      applyEmployeeData(d);
-      saveEmployeeCache(d);
+      const todayPromise = fetchEmployeesForDate(today);
+      const previousPromise = needPreviousNight
+        ? fetchEmployeesForDate(previousDate).catch(function(){ return { todayRecords: [] }; })
+        : Promise.resolve({ todayRecords: [] });
+
+      const result = await Promise.all([todayPromise, previousPromise]);
+      const d = result[0] || {};
+      const previous = result[1] || {};
+
+      const mergedData = {
+        date: today,
+        previousDate: previousDate,
+        employees: (d.employees && d.employees.length) ? d.employees : (previous.employees || []),
+        todayRecords: d.todayRecords || [],
+        previousRecords: needPreviousNight ? (previous.todayRecords || []) : []
+      };
+
+      applyEmployeeData(mergedData);
+      saveEmployeeCache(mergedData);
 
       if (employees.length === 0) {
         if (!silent) toast("No employees found. Add from Admin Panel first.","err");
