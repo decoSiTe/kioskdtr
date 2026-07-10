@@ -1190,45 +1190,63 @@
     if (isDayOffScheduled(emp, rec)) return [];
     if (isMorningShiftDutyFinished(emp, rec)) return [];
 
-    const shortAllowed = isShortBreakAllowed(emp, rec);
+    // Schedule is the source of truth:
+    // 8 hrs  = main break only
+    // 12 hrs = main break + short break
+    const scheduledHours = getScheduledHours(emp, rec);
+    const shortAllowed = scheduledHours === 12 || (scheduledHours === null && isShortBreakAllowed(emp, rec));
 
     const hasBreakStart = hasValue(rec.breakStart);
     const hasBreakEnd = hasValue(rec.breakEnd);
-    const hasShortStart = shortAllowed && hasValue(rec.shortBreakStart);
-    const hasShortEnd = shortAllowed && hasValue(rec.shortBreakEnd);
+    const hasShortStartRaw = hasValue(rec.shortBreakStart);
+    const hasShortEndRaw = hasValue(rec.shortBreakEnd);
+
+    // If an existing 8-hour row accidentally has an open short break, allow
+    // only Short Break End so the record can be closed. Do not allow a new
+    // Short Break Start on 8-hour schedules.
+    const shortStartedForClosing = hasShortStartRaw && !hasShortEndRaw;
+    const hasShortStart = shortAllowed ? hasShortStartRaw : shortStartedForClosing;
+    const hasShortEnd = shortAllowed ? hasShortEndRaw : false;
 
     const mainOpen = hasBreakStart && !hasBreakEnd;
     const shortOpen = hasShortStart && !hasShortEnd;
     const mainDone = hasBreakStart && hasBreakEnd;
-    const shortDone = hasShortStart && hasShortEnd;
+    const shortDone = shortAllowed && hasShortStartRaw && hasShortEndRaw;
 
     // End buttons must appear only when the matching start is already open
     // and the break has reached the minimum 15-minute duration.
     if (mainOpen) return isBreakEndTooSoon(rec.breakStart) ? [] : ["breakEnd"];
     if (shortOpen) return isBreakEndTooSoon(rec.shortBreakStart) ? [] : ["shortBreakEnd"];
 
-    // Night/afternoon shift: completed previous-night breaks must not show
-    // another End button after the short break is already finished.
+    // Afternoon/night shift: after the schedule is finished, do not offer
+    // new break starts. While still inside the same shift window, continue
+    // using the Google Sheet row for that work date.
     if (isNightShiftClosedUntilEvening(emp, rec, mainOpen, shortOpen, mainDone, shortDone, shortAllowed)) {
       return [];
     }
 
-    // 12-hour schedule: main break and short break are available.
-    // 8-hour schedule: only main break is available.
-    if (!hasBreakStart && !hasShortStart) {
+    // No break has started yet.
+    if (!hasBreakStart && !hasShortStartRaw) {
       const starts = ["breakStart"];
       if (shortAllowed) starts.push("shortBreakStart");
       return starts;
     }
 
-    if (mainDone && shortAllowed && !hasShortStart) return ["shortBreakStart"];
-    if (shortDone && !hasBreakStart) return ["breakStart"];
+    // Main break completed:
+    // - 12 hrs schedule: Short Break Start must show if it has not started yet.
+    // - 8 hrs schedule: no short break is available.
+    if (mainDone) {
+      if (shortAllowed && !hasShortStartRaw) return ["shortBreakStart"];
+      if (!shortAllowed || shortDone) return [];
+    }
 
-    if (mainDone && (!shortAllowed || shortDone)) return [];
+    // Short break completed first on a 12-hour schedule:
+    // Break Start must still be available if main break has not started.
+    if (shortDone && !hasBreakStart) return ["breakStart"];
 
     const actions = [];
     if (!hasBreakStart) actions.push("breakStart");
-    if (shortAllowed && !hasShortStart) actions.push("shortBreakStart");
+    if (shortAllowed && !hasShortStartRaw) actions.push("shortBreakStart");
     return actions;
   }
 
