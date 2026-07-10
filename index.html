@@ -573,6 +573,9 @@
   let scanner = null;
   let isSending = false;
   let todayRecords = {};
+  let previousRecords = {};
+  let todayDateStr = "";
+  let previousDateStr = "";
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
   const MIN_BREAK_END_MINUTES = 15; // hide end buttons until break is at least 15 minutes
@@ -592,42 +595,30 @@
   const fmtT = (d=new Date()) =>
     d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
 
+  function dateOffsetStr(baseDate, offsetDays) {
+    const d = new Date(baseDate || new Date());
+    d.setDate(d.getDate() + offsetDays);
+    return fmt(d);
+  }
+
   const EMP_CACHE_KEY = "kioskdtr_employee_cache_v7";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function applyEmployeeData(data) {
     employees = data.employees || [];
     todayRecords = {};
-
-    const todayDate = data.date || fmt();
-    const prevDate = data.previousDate || dateOffsetIso(-1);
+    previousRecords = {};
+    todayDateStr = data.todayDate || fmt();
+    previousDateStr = data.previousDate || dateOffsetStr(new Date(), -1);
 
     (data.todayRecords || []).forEach(function(rec) {
-      const key = String(rec.code || "").toUpperCase();
-      if (!key) return;
-      todayRecords[key] = Object.assign({}, rec, { date: rec.date || todayDate });
+      const copy = Object.assign({}, rec, { date: rec.date || todayDateStr });
+      todayRecords[String(copy.code).toUpperCase()] = copy;
     });
 
-    // Afternoon/night shift records after midnight still belong to the previous work date.
-    // Example: duty starts July 9 at 7:00 PM, breaks at July 10 12:56 AM / 4:50 AM
-    // must be read from the July 9 DTR row while the shift window is still active.
     (data.previousRecords || []).forEach(function(rec) {
-      const key = String(rec.code || "").toUpperCase();
-      if (!key) return;
-
-      const emp = employees.find(function(x) {
-        return String(x.code || "").toUpperCase() === key;
-      });
-      if (!emp || !isNightShiftEmployee(emp)) return;
-
-      const previousRec = Object.assign({}, rec, {
-        date: rec.date || prevDate,
-        previousNight: true
-      });
-
-      if (shouldUsePreviousNightRecord(previousRec, emp, todayRecords[key])) {
-        todayRecords[key] = previousRec;
-      }
+      const copy = Object.assign({}, rec, { date: rec.date || previousDateStr, previousNight: true, workDate: rec.workDate || previousDateStr });
+      previousRecords[String(copy.code).toUpperCase()] = copy;
     });
 
     const currentCode = document.getElementById("empIn")?.value.trim().toUpperCase();
@@ -637,42 +628,12 @@
     updateReminderStack();
   }
 
-  function hasOpenBreakRecord(rec) {
-    return !!rec && (
-      (hasValue(rec.breakStart) && !hasValue(rec.breakEnd)) ||
-      (hasValue(rec.shortBreakStart) && !hasValue(rec.shortBreakEnd))
-    );
-  }
-
-  function shouldUsePreviousNightRecord(previousRec, emp, todayRec) {
-    if (!previousRec || !emp || !isNightShiftEmployee(emp)) return false;
-
-    // If yesterday's night-shift row still has an open break, it must control the buttons
-    // until the employee closes that same break.
-    if (hasOpenBreakRecord(previousRec)) return true;
-
-    // While the previous night-shift schedule is still active, use yesterday's row.
-    // This keeps Break End / Short Break End correct for early-morning actions.
-    const nowInWindow = currentMinutesInShiftWindow(emp, previousRec);
-    const shiftEnd = shiftEndMinutesInWindow(emp, previousRec);
-    if (nowInWindow <= shiftEnd) return true;
-
-    // After the previous shift is finished, do not let yesterday's completed row block
-    // today's new night shift. The new shift will open again at 7:00 PM.
-    return false;
-  }
-
-  function dateOffsetIso(days) {
-    const d = new Date();
-    d.setDate(d.getDate() + Number(days || 0));
-    return d.toLocaleDateString("en-CA");
-  }
-
   function saveEmployeeCache(data) {
     try {
       localStorage.setItem(EMP_CACHE_KEY, JSON.stringify({
-        date: data.date || fmt(),
-        previousDate: data.previousDate || dateOffsetIso(-1),
+        date: fmt(),
+        todayDate: data.todayDate || todayDateStr || fmt(),
+        previousDate: data.previousDate || previousDateStr || dateOffsetStr(new Date(), -1),
         savedAt: Date.now(),
         employees: data.employees || [],
         todayRecords: data.todayRecords || [],
@@ -689,12 +650,13 @@
       if (!cached || cached.date !== fmt()) return false;
 
       // Employees can be reused from cache for fast startup.
-      // Records are used only when the cache is fresh, so old break state will not control a new shift.
+      // Today records are used only when the cache is fresh, so yesterday-night
+      // break state will not control the new afternoon shift in the evening.
       const freshRecords = (Date.now() - Number(cached.savedAt || 0)) <= EMP_CACHE_MAX_AGE_MS;
       applyEmployeeData({
-        date: cached.date || fmt(),
-        previousDate: cached.previousDate || dateOffsetIso(-1),
         employees: cached.employees || [],
+        todayDate: cached.todayDate || fmt(),
+        previousDate: cached.previousDate || dateOffsetStr(new Date(), -1),
         todayRecords: freshRecords ? (cached.todayRecords || []) : [],
         previousRecords: freshRecords ? (cached.previousRecords || []) : []
       });
@@ -704,8 +666,6 @@
     }
   }
 
-
-  // ── Load employees from Google Sheets ─────────────────────────────────────
   async function fetchEmployeesForDate(targetDate) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
@@ -720,6 +680,7 @@
     }
   }
 
+  // ── Load employees from Google Sheets ─────────────────────────────────────
   async function loadEmps(silent) {
     // Only skip if URL is literally the placeholder text
     if (!SCRIPT_URL || SCRIPT_URL.trim() === "YOUR_APPS_SCRIPT_URL_HERE") {
@@ -745,28 +706,28 @@
 
     try {
       const today = fmt();
-      const previousDate = dateOffsetIso(-1);
-      const needPreviousNight = currentMinutes() < (12 * 60);
+      const previous = dateOffsetStr(new Date(), -1);
+      const d = await fetchEmployeesForDate(today);
+      let dPrev = { todayRecords: [] };
 
-      const todayPromise = fetchEmployeesForDate(today);
-      const previousPromise = needPreviousNight
-        ? fetchEmployeesForDate(previousDate).catch(function(){ return { todayRecords: [] }; })
-        : Promise.resolve({ todayRecords: [] });
+      // Afternoon/night shift breaks after midnight still belong to the previous work date.
+      // Load yesterday also, so buttons are based on the actual Google Sheet row for that shift.
+      try {
+        dPrev = await fetchEmployeesForDate(previous);
+      } catch(prevErr) {
+        console.warn("Previous shift record sync failed:", prevErr);
+      }
 
-      const result = await Promise.all([todayPromise, previousPromise]);
-      const d = result[0] || {};
-      const previous = result[1] || {};
-
-      const mergedData = {
-        date: today,
-        previousDate: previousDate,
-        employees: (d.employees && d.employees.length) ? d.employees : (previous.employees || []),
+      const merged = {
+        employees: d.employees || dPrev.employees || [],
+        todayDate: today,
+        previousDate: previous,
         todayRecords: d.todayRecords || [],
-        previousRecords: needPreviousNight ? (previous.todayRecords || []) : []
+        previousRecords: dPrev.todayRecords || []
       };
 
-      applyEmployeeData(mergedData);
-      saveEmployeeCache(mergedData);
+      applyEmployeeData(merged);
+      saveEmployeeCache(merged);
 
       if (employees.length === 0) {
         if (!silent) toast("No employees found. Add from Admin Panel first.","err");
@@ -811,6 +772,71 @@
 
   function hasValue(value) {
     return String(value || "").trim() !== "";
+  }
+
+  function hasRecordData(rec) {
+    if (!rec) return false;
+    return ["arrival", "breakStart", "shortBreakStart", "breakEnd", "shortBreakEnd", "departure", "lastAction"].some(function(key) {
+      return hasValue(rec[key]);
+    });
+  }
+
+  function isEarlyMorningShiftWindow(emp) {
+    if (!isNightShiftEmployee(emp)) return false;
+    const previousForSchedule = { date: previousDateStr || dateOffsetStr(new Date(), -1), previousNight: true, workDate: previousDateStr || dateOffsetStr(new Date(), -1) };
+    return currentMinutes() < getNightShiftEndMinutes(emp, previousForSchedule);
+  }
+
+  function getActiveRecordState(emp) {
+    const codeKey = String((emp && emp.code) || "").toUpperCase();
+    const todayRec = todayRecords[codeKey] || {};
+    const previousRec = previousRecords[codeKey] || {};
+
+    if (isNightShiftEmployee(emp) && isEarlyMorningShiftWindow(emp)) {
+      const workDate = previousDateStr || dateOffsetStr(new Date(), -1);
+
+      // Prefer the previous work-date row. This is the correct row for the night shift.
+      if (hasRecordData(previousRec)) {
+        return {
+          source: "previous",
+          date: workDate,
+          record: Object.assign({}, previousRec, { date: workDate, previousNight: true, workDate: workDate })
+        };
+      }
+
+      // If old data was saved on the current calendar date before this fix, still use it
+      // for button decisions, but treat the schedule/work date as yesterday.
+      if (hasRecordData(todayRec)) {
+        return {
+          source: "today",
+          date: workDate,
+          record: Object.assign({}, todayRec, { date: workDate, previousNight: true, workDate: workDate })
+        };
+      }
+
+      return {
+        source: "previous",
+        date: workDate,
+        record: { code: codeKey, date: workDate, previousNight: true, workDate: workDate }
+      };
+    }
+
+    const today = todayDateStr || fmt();
+    return {
+      source: "today",
+      date: today,
+      record: Object.assign({}, todayRec, { date: today, workDate: today })
+    };
+  }
+
+  function saveActiveRecordState(emp, rec, state) {
+    const codeKey = String((emp && emp.code) || "").toUpperCase();
+    if (!codeKey) return;
+    if (state && state.source === "previous") {
+      previousRecords[codeKey] = Object.assign({}, rec, { date: state.date, previousNight: true, workDate: state.date });
+    } else {
+      todayRecords[codeKey] = Object.assign({}, rec, { date: state && state.date ? state.date : (todayDateStr || fmt()) });
+    }
   }
 
   function timeTextToMinutes(value) {
@@ -867,8 +893,8 @@
 
     const reminders = [];
     employees.forEach(function(emp) {
-      const codeKey = String(emp.code || "").toUpperCase();
-      const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {}, emp);
+      const activeState = getActiveRecordState(emp);
+      const rec = cleanStaleNightShiftEnds(activeState.record || {}, emp);
       const action = openBreakReminderAction(rec, emp);
       if (action && shouldShowBreakReminder(rec, emp)) {
         reminders.push({ emp: emp, action: action });
@@ -935,12 +961,12 @@
   }
 
   function currentShiftDateForSchedule(emp, rec) {
-    if (rec && rec.date) return rec.date;
-    const now = new Date();
+    if (rec && rec.workDate) return rec.workDate;
     if (isNightShiftEmployee(emp) && currentMinutes() < (12 * 60)) {
-      now.setDate(now.getDate() - 1);
+      return previousDateStr || dateOffsetStr(new Date(), -1);
     }
-    return fmt(now);
+    if (rec && rec.date) return rec.date;
+    return fmt();
   }
 
   function dayAliasesFromIso(isoDate) {
@@ -1245,8 +1271,9 @@
       emp.code + " · " + (emp.department||"") + " · " + (emp.position||"");
 
     const codeKey = String(emp.code).toUpperCase();
-    const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {}, emp);
-    todayRecords[codeKey] = rec;
+    const activeState = getActiveRecordState(emp);
+    const rec = cleanStaleNightShiftEnds(activeState.record || {}, emp);
+    saveActiveRecordState(emp, rec, activeState);
     const departedTime = String(rec.departure || "").trim();
     const alreadyDeparted = isDepartureRecorded(rec);
     const visibleKeys = alreadyDeparted ? [] : getNextVisibleActions(rec, emp);
@@ -1316,8 +1343,9 @@
       if (isSending || b.disabled) return;
 
       const codeKey = currentEmp ? String(currentEmp.code).toUpperCase() : "";
-      const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {}, currentEmp);
-      todayRecords[codeKey] = rec;
+      const activeState = getActiveRecordState(currentEmp);
+      const rec = cleanStaleNightShiftEnds(activeState.record || {}, currentEmp);
+      saveActiveRecordState(currentEmp, rec, activeState);
       if (isDepartureRecorded(rec)) {
         lockDepartedEmployee(currentEmp, rec.departure || "");
         return;
@@ -1348,36 +1376,39 @@
     if (!currentEmp || isSending) return;
     isSending = true;
     const emp = currentEmp;
-    const now = new Date(), date=fmt(now), time=fmtT(now), ts=now.toISOString();
+    const now = new Date(), calendarDate=fmt(now), time=fmtT(now), ts=now.toISOString();
 
     const codeKey = String(emp.code).toUpperCase();
-    if (!todayRecords[codeKey]) todayRecords[codeKey] = {};
-    todayRecords[codeKey] = cleanStaleNightShiftEnds(todayRecords[codeKey], emp);
+    const activeState = getActiveRecordState(emp);
+    const workDate = activeState.date || calendarDate;
+    const activeRec = cleanStaleNightShiftEnds(activeState.record || {}, emp);
+    saveActiveRecordState(emp, activeRec, activeState);
 
-    if (isDayOffScheduled(emp, todayRecords[codeKey])) {
+    if (isDayOffScheduled(emp, activeRec)) {
       toast("⚠️ Day off. Break buttons are not available.", "warn");
       isSending = false;
       return;
     }
 
-    if (isMorningShiftDutyFinished(emp, todayRecords[codeKey])) {
+    if (isMorningShiftDutyFinished(emp, activeRec)) {
       toast("⚠️ Duty schedule is finished. Break buttons are not available.", "warn");
       isSending = false;
       return;
     }
 
-    todayRecords[codeKey][key] = time;
+    activeRec[key] = time;
+    saveActiveRecordState(emp, activeRec, activeState);
     const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
 
-    const updatedVisibleKeys = getNextVisibleActions(todayRecords[codeKey], emp);
+    const updatedVisibleKeys = getNextVisibleActions(activeRec, emp);
     setVisibleActions(updatedVisibleKeys);
     const note = document.querySelector(".note");
-    if (note) note.textContent = actionInstruction(todayRecords[codeKey], updatedVisibleKeys, emp);
+    if (note) note.textContent = actionInstruction(activeRec, updatedVisibleKeys, emp);
     updateReminderStack();
 
     const payload = {
-      type:"attendance", date, timestamp:ts,
+      type:"attendance", date:workDate, timestamp:ts,
       employeeCode:emp.code, employeeName:emp.name,
       department:emp.department||"", position:emp.position||"",
       lastAction:labels[key], source:"qr-kiosk"
