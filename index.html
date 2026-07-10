@@ -601,25 +601,72 @@
     return fmt(d);
   }
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v7";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v8";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
+
+  function normalizeIsoDateValue(value) {
+    if (!value) return "";
+    const text = String(value).trim();
+    const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (iso) return iso[1] + "-" + String(iso[2]).padStart(2,"0") + "-" + String(iso[3]).padStart(2,"0");
+    const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (slash) return slash[3] + "-" + String(slash[1]).padStart(2,"0") + "-" + String(slash[2]).padStart(2,"0");
+    return text.slice(0,10);
+  }
+
+  function getRecordCode(rec) {
+    return String((rec && (rec.code || rec.employeeCode || rec["Employee Code"])) || "").trim().toUpperCase();
+  }
+
+  function recordProgressScore(rec) {
+    if (!rec) return 0;
+    let score = 0;
+    if (hasValue(rec.arrival)) score += 2;
+    if (hasValue(rec.breakStart)) score += 10;
+    if (hasValue(rec.breakEnd)) score += 20;
+    if (hasValue(rec.shortBreakStart)) score += 30;
+    if (hasValue(rec.shortBreakEnd)) score += 40;
+    if (hasValue(rec.departure)) score += 50;
+    if (hasValue(rec.lastAction)) score += 1;
+    if (hasValue(rec.timestamp)) score += .5;
+    return score;
+  }
+
+  function buildRecordMap(records, targetDate, markPreviousNight) {
+    const map = {};
+    (records || []).forEach(function(rec) {
+      if (!rec) return;
+      const recDate = normalizeIsoDateValue(rec.date || rec.workDate || rec.Date || "");
+
+      // When Apps Script returns only the requested date, rec.date may be blank.
+      // When it returns many rows, use only the row matching the requested date.
+      if (recDate && recDate !== targetDate) return;
+
+      const codeKey = getRecordCode(rec);
+      if (!codeKey) return;
+
+      const copy = Object.assign({}, rec, {
+        code: rec.code || rec.employeeCode || rec["Employee Code"] || codeKey,
+        date: recDate || targetDate,
+        workDate: rec.workDate || recDate || targetDate
+      });
+      if (markPreviousNight) copy.previousNight = true;
+
+      const old = map[codeKey];
+      if (!old || recordProgressScore(copy) >= recordProgressScore(old)) {
+        map[codeKey] = copy;
+      }
+    });
+    return map;
+  }
 
   function applyEmployeeData(data) {
     employees = data.employees || [];
-    todayRecords = {};
-    previousRecords = {};
-    todayDateStr = data.todayDate || fmt();
-    previousDateStr = data.previousDate || dateOffsetStr(new Date(), -1);
+    todayDateStr = normalizeIsoDateValue(data.todayDate) || fmt();
+    previousDateStr = normalizeIsoDateValue(data.previousDate) || dateOffsetStr(new Date(), -1);
 
-    (data.todayRecords || []).forEach(function(rec) {
-      const copy = Object.assign({}, rec, { date: rec.date || todayDateStr });
-      todayRecords[String(copy.code).toUpperCase()] = copy;
-    });
-
-    (data.previousRecords || []).forEach(function(rec) {
-      const copy = Object.assign({}, rec, { date: rec.date || previousDateStr, previousNight: true, workDate: rec.workDate || previousDateStr });
-      previousRecords[String(copy.code).toUpperCase()] = copy;
-    });
+    todayRecords = buildRecordMap(data.todayRecords || [], todayDateStr, false);
+    previousRecords = buildRecordMap(data.previousRecords || [], previousDateStr, true);
 
     const currentCode = document.getElementById("empIn")?.value.trim().toUpperCase();
     if (currentCode) {
@@ -787,6 +834,49 @@
     return currentMinutes() < getNightShiftEndMinutes(emp, previousForSchedule);
   }
 
+  function hasOpenMainBreak(rec) {
+    return !!rec && hasValue(rec.breakStart) && !hasValue(rec.breakEnd);
+  }
+
+  function hasOpenShortBreak(rec) {
+    return !!rec && hasValue(rec.shortBreakStart) && !hasValue(rec.shortBreakEnd);
+  }
+
+  function recordHasCompletedAllAllowedBreaks(rec, emp) {
+    if (!rec) return false;
+    const shortAllowed = isShortBreakAllowed(emp, rec);
+    const mainDone = hasValue(rec.breakStart) && hasValue(rec.breakEnd);
+    const shortDone = hasValue(rec.shortBreakStart) && hasValue(rec.shortBreakEnd);
+    return mainDone && (!shortAllowed || shortDone);
+  }
+
+  function recordNeedsShortBreakStart(rec, emp) {
+    if (!rec) return false;
+    return isShortBreakAllowed(emp, rec) &&
+      hasValue(rec.breakStart) && hasValue(rec.breakEnd) &&
+      !hasValue(rec.shortBreakStart);
+  }
+
+  function chooseNightShiftRecord(emp, previousCandidate, todayCandidate) {
+    // Open breaks always win, so the correct End button can appear.
+    if (hasOpenMainBreak(previousCandidate) || hasOpenShortBreak(previousCandidate)) return previousCandidate;
+    if (hasOpenMainBreak(todayCandidate) || hasOpenShortBreak(todayCandidate)) return todayCandidate;
+
+    // If the previous work-date row already has all scheduled breaks completed,
+    // keep it closed until the next 7:00 PM shift. This fixes completed night-shift
+    // rows like: Break 23:54→00:56 and Short Break 04:50→05:44.
+    if (recordHasCompletedAllAllowedBreaks(previousCandidate, emp)) return previousCandidate;
+    if (recordHasCompletedAllAllowedBreaks(todayCandidate, emp)) return todayCandidate;
+
+    // If main break is complete and the employee is 12 hours, show Short Break Start.
+    if (recordNeedsShortBreakStart(previousCandidate, emp)) return previousCandidate;
+    if (recordNeedsShortBreakStart(todayCandidate, emp)) return todayCandidate;
+
+    if (hasRecordData(previousCandidate)) return previousCandidate;
+    if (hasRecordData(todayCandidate)) return todayCandidate;
+    return null;
+  }
+
   function getActiveRecordState(emp) {
     const codeKey = String((emp && emp.code) || "").toUpperCase();
     const todayRec = todayRecords[codeKey] || {};
@@ -795,22 +885,23 @@
     if (isNightShiftEmployee(emp) && isEarlyMorningShiftWindow(emp)) {
       const workDate = previousDateStr || dateOffsetStr(new Date(), -1);
 
-      // Prefer the previous work-date row. This is the correct row for the night shift.
-      if (hasRecordData(previousRec)) {
-        return {
-          source: "previous",
-          date: workDate,
-          record: Object.assign({}, previousRec, { date: workDate, previousNight: true, workDate: workDate })
-        };
-      }
+      const previousCandidate = hasRecordData(previousRec)
+        ? Object.assign({}, previousRec, { date: workDate, previousNight: true, workDate: workDate })
+        : null;
 
-      // If old data was saved on the current calendar date before this fix, still use it
-      // for button decisions, but treat the schedule/work date as yesterday.
-      if (hasRecordData(todayRec)) {
+      // Some old rows were saved on the calendar date after midnight. During the
+      // active night shift window, treat those early-morning rows as part of the
+      // previous work date, so the button sequence still follows the Google Sheet data.
+      const todayCandidate = hasRecordData(todayRec)
+        ? Object.assign({}, todayRec, { date: workDate, previousNight: true, workDate: workDate, calendarDate: todayDateStr || fmt() })
+        : null;
+
+      const chosen = chooseNightShiftRecord(emp, previousCandidate, todayCandidate);
+      if (chosen) {
         return {
-          source: "today",
+          source: chosen === previousCandidate ? "previous" : "today",
           date: workDate,
-          record: Object.assign({}, todayRec, { date: workDate, previousNight: true, workDate: workDate })
+          record: chosen
         };
       }
 
@@ -984,22 +1075,21 @@
     return days[d.getDay()];
   }
 
-  function getScheduledHours(emp, rec) {
+  function getScheduledHoursForDate(emp, isoDate) {
     const schedule = String((emp && emp.schedule) || "").toUpperCase();
     if (!schedule) return null;
 
-    const aliases = dayAliasesFromIso(currentShiftDateForSchedule(emp, rec));
+    const aliases = dayAliasesFromIso(isoDate || fmt());
 
-    // Day-specific schedule parser.
-    // If today's day is marked OFF / DAY OFF, or if the schedule has day entries
-    // but today's day is missing, treat it as Day Off and hide all break buttons.
-    const dayEntryRegex = /(MONDAY|MON|M|TUESDAY|TUE|T|WEDNESDAY|WED|W|THURSDAY|THU|TH|FRIDAY|FRI|F|SATURDAY|SAT|SA|SUNDAY|SUN|SU)\s*[:=\-]?\s*(8|12|0|OFF|DAY\s*OFF|REST|REST\s*DAY)\s*(?:HRS?|HOURS?)?/g;
+    // Day-specific schedule parser. Supports:
+    // M:8hrs, T:12hrs, W:8hrs, TH:12hrs, F:12hrs, SA:8hrs, SUN:OFF
+    const tokenRegex = /\b(MONDAY|MON|M|TUESDAY|TUE|T|WEDNESDAY|WED|W|THURSDAY|THU|TH|FRIDAY|FRI|F|SATURDAY|SAT|SA|SUNDAY|SUN|SU)\b\s*[:=\-]?\s*(12|8|0|OFF|DAY\s*OFF|REST\s*DAY|REST)\s*(?:HRS?|HOURS?)?/g;
     let match;
     let hasDayEntries = false;
 
-    while ((match = dayEntryRegex.exec(schedule)) !== null) {
+    while ((match = tokenRegex.exec(schedule)) !== null) {
       hasDayEntries = true;
-      const day = match[1];
+      const day = String(match[1] || "").trim();
       const value = String(match[2] || "").replace(/\s+/g, " ").trim();
 
       if (aliases.includes(day)) {
@@ -1009,16 +1099,18 @@
     }
 
     // Fallback for old/simple schedule text like "12 hours" or "8 hrs".
-    // Only use this when there are no day-specific entries.
     if (!hasDayEntries) {
-      const simple = schedule.match(/\b(8|12)\s*(?:HRS?|HOURS?)\b/);
+      const simple = schedule.match(/\b(12|8)\s*(?:HRS?|HOURS?)\b/);
       if (simple) return Number(simple[1]);
     }
 
-    // Schedule has entries for some days, but not this day = Day Off.
+    // Schedule has working-day entries, but not this day = Day Off.
     if (hasDayEntries) return 0;
-
     return null;
+  }
+
+  function getScheduledHours(emp, rec) {
+    return getScheduledHoursForDate(emp, currentShiftDateForSchedule(emp, rec));
   }
 
   function isDayOffScheduled(emp, rec) {
@@ -1251,7 +1343,8 @@
   }
 
   function actionInstruction(rec, visibleKeys, emp) {
-    const shortAllowed = isShortBreakAllowed(emp, rec || {});
+    const scheduledHours = getScheduledHours(emp, rec || {});
+    const shortAllowed = scheduledHours === 12 || (scheduledHours === null && isShortBreakAllowed(emp, rec || {}));
     const hasBreakStart = hasValue((rec || {}).breakStart);
     const hasBreakEnd = hasValue((rec || {}).breakEnd);
     const hasShortStart = shortAllowed && hasValue((rec || {}).shortBreakStart);
