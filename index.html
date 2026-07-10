@@ -413,6 +413,72 @@
     .toast.err{border-color:#ff3b6b;color:#ff6a8b;box-shadow:0 0 18px rgba(255,0,80,.22);}
     .toast.warn{border-color:var(--orange);color:#ffd166;box-shadow:0 0 18px rgba(255,153,0,.22);}
 
+    .reminder-stack{
+      position:fixed;
+      left:28px;
+      top:92px;
+      z-index:5;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+      width:260px;
+      pointer-events:none;
+    }
+
+    .glass-reminder{
+      position:relative;
+      overflow:hidden;
+      border-radius:999px;
+      padding:12px 18px;
+      min-height:44px;
+      color:#061022;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,.82), rgba(210,226,255,.56)),
+        radial-gradient(circle at 20% 12%, rgba(255,255,255,.95), transparent 40%);
+      border:1px solid rgba(255,255,255,.72);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.92),
+        inset 0 -12px 24px rgba(20,30,60,.16),
+        0 12px 30px rgba(0,0,0,.24),
+        0 0 26px rgba(0,255,255,.16);
+      backdrop-filter:blur(18px) saturate(1.35);
+      -webkit-backdrop-filter:blur(18px) saturate(1.35);
+      font-family:Arial, sans-serif;
+      font-size:12px;
+      font-weight:800;
+      letter-spacing:.2px;
+      text-transform:none;
+      text-align:center;
+    }
+
+    .glass-reminder::before{
+      content:"";
+      position:absolute;
+      inset:2px 12px auto 12px;
+      height:38%;
+      border-radius:999px;
+      background:linear-gradient(180deg, rgba(255,255,255,.92), rgba(255,255,255,.08));
+      opacity:.72;
+      pointer-events:none;
+    }
+
+    .glass-reminder.title{
+      font-size:20px;
+      font-weight:500;
+      padding:9px 18px;
+      color:#0b1020;
+    }
+
+    .glass-reminder .small{
+      display:block;
+      margin-top:3px;
+      font-size:10px;
+      font-weight:700;
+      color:rgba(6,16,34,.72);
+      text-transform:uppercase;
+      letter-spacing:.8px;
+    }
+
     .hidden{display:none!important;}
     .hidden-action{display:none!important;}
 
@@ -444,6 +510,14 @@
       .grid2{gap:8px;}
       .grid2.single-action .abtn{width:100%;min-width:0;}
       .abtn{font-size:12px;min-height:54px;padding:12px 8px;}
+      .reminder-stack{
+        left:14px;
+        right:14px;
+        top:auto;
+        bottom:18px;
+        width:auto;
+      }
+      .glass-reminder.title{font-size:16px;}
     }
   </style>
   <link rel="icon" type="image/png" href="clock.png">
@@ -451,6 +525,7 @@
 <body>
 <div class="vapor-bg"><div class="sun"></div><div class="grid-floor"></div></div>
 <div class="scanlines"></div>
+<div class="reminder-stack hidden" id="reminderStack"></div>
 <div class="wrap">
   <div class="header"><h1>KS Internal DTR Kiosk</h1><p>Daily Time Record System</p></div>
   <div class="clock" id="clk">--:--:--</div>
@@ -501,6 +576,7 @@
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
   const MIN_BREAK_END_MINUTES = 15; // hide end buttons until break is at least 15 minutes
+  const REMINDER_BEFORE_SHIFT_END_MINUTES = 4 * 60; // liquid reminder starts 4 hours before shift end
 
   // Clock
   function tick() {
@@ -530,6 +606,7 @@
     if (currentCode) {
       document.getElementById("empIn").dispatchEvent(new Event("input"));
     }
+    updateReminderStack();
   }
 
   function saveEmployeeCache(data) {
@@ -661,6 +738,74 @@
   function currentMinutes() {
     const n = new Date();
     return n.getHours() * 60 + n.getMinutes();
+  }
+
+  function currentMinutesInShiftWindow(emp, rec) {
+    const nowMins = currentMinutes();
+    if (isNightShiftEmployee(emp)) {
+      const start = getNightShiftStartMinutes();
+      return nowMins >= start ? nowMins : nowMins + (24 * 60);
+    }
+    return nowMins;
+  }
+
+  function shiftEndMinutesInWindow(emp, rec) {
+    if (isNightShiftEmployee(emp)) {
+      return getNightShiftEndMinutes(emp, rec) + (24 * 60);
+    }
+    return getMorningShiftEndMinutes(emp, rec);
+  }
+
+  function openBreakReminderAction(rec, emp) {
+    if (!rec || !emp || isDepartureRecorded(rec) || isDayOffScheduled(emp, rec)) return "";
+    const shortAllowed = isShortBreakAllowed(emp, rec);
+    if (hasValue(rec.breakStart) && !hasValue(rec.breakEnd)) return "Break End";
+    if (shortAllowed && hasValue(rec.shortBreakStart) && !hasValue(rec.shortBreakEnd)) return "Short Break End";
+    return "";
+  }
+
+  function shouldShowBreakReminder(rec, emp) {
+    const action = openBreakReminderAction(rec, emp);
+    if (!action) return false;
+    const nowInWindow = currentMinutesInShiftWindow(emp, rec);
+    const shiftEnd = shiftEndMinutesInWindow(emp, rec);
+    return nowInWindow >= (shiftEnd - REMINDER_BEFORE_SHIFT_END_MINUTES);
+  }
+
+  function updateReminderStack() {
+    const stack = document.getElementById("reminderStack");
+    if (!stack) return;
+
+    const reminders = [];
+    employees.forEach(function(emp) {
+      const codeKey = String(emp.code || "").toUpperCase();
+      const rec = cleanStaleNightShiftEnds(todayRecords[codeKey] || {}, emp);
+      const action = openBreakReminderAction(rec, emp);
+      if (action && shouldShowBreakReminder(rec, emp)) {
+        reminders.push({ emp: emp, action: action });
+      }
+    });
+
+    if (!reminders.length) {
+      stack.classList.add("hidden");
+      stack.innerHTML = "";
+      return;
+    }
+
+    stack.innerHTML = '<div class="glass-reminder title">Reminder</div>' +
+      reminders.slice(0, 5).map(function(item) {
+        return '<div class="glass-reminder">' +
+          escapeHtml(item.emp.name || item.emp.code || "Employee") +
+          '<span class="small">Please tap ' + escapeHtml(item.action) + '</span>' +
+        '</div>';
+      }).join("");
+    stack.classList.remove("hidden");
+  }
+
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>"']/g, function(ch) {
+      return ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[ch];
+    });
   }
 
   function minutesSinceTime(startValue) {
@@ -817,6 +962,9 @@
     // Previous-night record can continue only while the night-shift schedule is still active.
     // Example 12-hour night shift: after 7:00 AM, do not show Short Break Start even if it was unused.
     if (rec && rec.previousNight) {
+      // After 7:00 PM, a new afternoon/night shift has started.
+      // Completed previous-night rows must not keep the buttons closed.
+      if (nowMins >= shiftStartMins) return false;
       if (nowMins >= shiftEndMins) return true;
       const completedAllAllowedBreaks = mainDone && (!shortAllowed || shortDone);
       return completedAllAllowedBreaks;
@@ -859,10 +1007,23 @@
 
       // After noon/evening, previous-night completed break records must not block
       // the new shift. Keep only genuinely open breaks that still need an End button.
-      const open = { code: cleaned.code || (emp && emp.code) || "", previousNight: true };
-      if (hasValue(cleaned.breakStart) && !hasValue(cleaned.breakEnd)) open.breakStart = cleaned.breakStart;
-      if (hasValue(cleaned.shortBreakStart) && !hasValue(cleaned.shortBreakEnd)) open.shortBreakStart = cleaned.shortBreakStart;
-      return open;
+      // If there is no open break, return a clean empty state so the new 7:00 PM
+      // afternoon shift can show Break Start / Short Break Start normally.
+      const open = {};
+      let hasOpenBreak = false;
+      if (hasValue(cleaned.breakStart) && !hasValue(cleaned.breakEnd)) {
+        open.code = cleaned.code || (emp && emp.code) || "";
+        open.previousNight = true;
+        open.breakStart = cleaned.breakStart;
+        hasOpenBreak = true;
+      }
+      if (hasValue(cleaned.shortBreakStart) && !hasValue(cleaned.shortBreakEnd)) {
+        open.code = cleaned.code || (emp && emp.code) || "";
+        open.previousNight = true;
+        open.shortBreakStart = cleaned.shortBreakStart;
+        hasOpenBreak = true;
+      }
+      return hasOpenBreak ? open : {};
     }
 
     // Afternoon/night-shift reset rule:
@@ -1031,6 +1192,8 @@
 
     show("actCard",true);
 
+    updateReminderStack();
+
     if (alreadyDeparted) {
       toast("⚠️ " + emp.name + " already departed" + (departedTime ? " at " + departedTime : "") + ". Attendance completed for today.", "warn");
     } else if (!visibleKeys.length) {
@@ -1039,7 +1202,7 @@
       hideToast();
     }
   }
-  function hideEmp() { currentEmp=null; show("actCard",false); }
+  function hideEmp() { currentEmp=null; show("actCard",false); updateReminderStack(); }
 
   // ── Action buttons ────────────────────────────────────────────────────────
   const labels = {
@@ -1122,6 +1285,7 @@
     setVisibleActions(updatedVisibleKeys);
     const note = document.querySelector(".note");
     if (note) note.textContent = actionInstruction(todayRecords[codeKey], updatedVisibleKeys, emp);
+    updateReminderStack();
 
     const payload = {
       type:"attendance", date, timestamp:ts,
