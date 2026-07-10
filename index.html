@@ -576,6 +576,7 @@
   let previousRecords = {};
   let todayDateStr = "";
   let previousDateStr = "";
+  let recordsReady = false;
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
   const MIN_BREAK_END_MINUTES = 15; // hide end buttons until break is at least 15 minutes
@@ -601,7 +602,7 @@
     return fmt(d);
   }
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v8";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v10";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function normalizeIsoDateValue(value) {
@@ -662,6 +663,7 @@
 
   function applyEmployeeData(data) {
     employees = data.employees || [];
+    recordsReady = data.recordsReady !== false;
     todayDateStr = normalizeIsoDateValue(data.todayDate) || fmt();
     previousDateStr = normalizeIsoDateValue(data.previousDate) || dateOffsetStr(new Date(), -1);
 
@@ -705,7 +707,8 @@
         todayDate: cached.todayDate || fmt(),
         previousDate: cached.previousDate || dateOffsetStr(new Date(), -1),
         todayRecords: freshRecords ? (cached.todayRecords || []) : [],
-        previousRecords: freshRecords ? (cached.previousRecords || []) : []
+        previousRecords: freshRecords ? (cached.previousRecords || []) : [],
+        recordsReady: freshRecords
       });
       return employees.length > 0;
     } catch (_) {
@@ -725,6 +728,26 @@
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async function fetchDtrRows() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const r = await fetch(SCRIPT_URL + "?action=getDtrRows&_=" + Date.now(), {
+        cache: "no-store",
+        signal: controller.signal
+      });
+      return await r.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function filterRowsByDate(rows, targetDate) {
+    return (rows || []).filter(function(row) {
+      return normalizeIsoDateValue(row.date || row.Date || row.workDate || "") === targetDate;
+    });
   }
 
   // ── Load employees from Google Sheets ─────────────────────────────────────
@@ -756,6 +779,7 @@
       const previous = dateOffsetStr(new Date(), -1);
       const d = await fetchEmployeesForDate(today);
       let dPrev = { todayRecords: [] };
+      let allDtrRows = [];
 
       // Afternoon/night shift breaks after midnight still belong to the previous work date.
       // Load yesterday also, so buttons are based on the actual Google Sheet row for that shift.
@@ -765,12 +789,27 @@
         console.warn("Previous shift record sync failed:", prevErr);
       }
 
+      // Source of truth for button logic:
+      // getDtrRows returns the actual DTR table rows, so completed previous-night
+      // breaks are also detected. This prevents showing Break Start / Short Break Start
+      // when the staff already completed all breaks for the active night shift.
+      try {
+        const rowsResult = await fetchDtrRows();
+        allDtrRows = rowsResult.rows || [];
+      } catch(rowsErr) {
+        console.warn("DTR rows sync failed; using getEmployees records only:", rowsErr);
+      }
+
+      const todayRows = filterRowsByDate(allDtrRows, today);
+      const previousRows = filterRowsByDate(allDtrRows, previous);
+
       const merged = {
         employees: d.employees || dPrev.employees || [],
         todayDate: today,
         previousDate: previous,
-        todayRecords: d.todayRecords || [],
-        previousRecords: dPrev.todayRecords || []
+        todayRecords: todayRows.length ? todayRows : (d.todayRecords || []),
+        previousRecords: previousRows.length ? previousRows : (dPrev.todayRecords || []),
+        recordsReady: true
       };
 
       applyEmployeeData(merged);
@@ -1385,6 +1424,16 @@
     const activeState = getActiveRecordState(emp);
     const rec = cleanStaleNightShiftEnds(activeState.record || {}, emp);
     saveActiveRecordState(emp, rec, activeState);
+
+    if (!recordsReady) {
+      setVisibleActions([]);
+      const note = document.querySelector(".note");
+      if (note) note.textContent = "Syncing latest DTR records. Please wait.";
+      show("actCard", true);
+      toast("Syncing latest DTR records. Please wait.", "warn");
+      return;
+    }
+
     const departedTime = String(rec.departure || "").trim();
     const alreadyDeparted = isDepartureRecorded(rec);
     const visibleKeys = alreadyDeparted ? [] : getNextVisibleActions(rec, emp);
