@@ -602,7 +602,7 @@
     return fmt(d);
   }
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v10";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v11";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function normalizeIsoDateValue(value) {
@@ -615,8 +615,94 @@
     return text.slice(0,10);
   }
 
+  function normalizeRecordKey(key) {
+    return String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function getRecordField(rec, keys) {
+    if (!rec) return "";
+    const wanted = (keys || []).map(normalizeRecordKey);
+
+    // First try exact key names.
+    for (const key of keys || []) {
+      if (Object.prototype.hasOwnProperty.call(rec, key) && String(rec[key] ?? "").trim() !== "") {
+        return rec[key];
+      }
+    }
+
+    // Then try normalized column headers. This is important because Apps Script
+    // / Google Sheet rows may return headers like "Break Start", "Short Break End",
+    // "Employee Code", or "Last Action" instead of camelCase names.
+    const normalized = {};
+    Object.keys(rec).forEach(function(key) {
+      normalized[normalizeRecordKey(key)] = rec[key];
+    });
+
+    for (const key of wanted) {
+      if (Object.prototype.hasOwnProperty.call(normalized, key) && String(normalized[key] ?? "").trim() !== "") {
+        return normalized[key];
+      }
+    }
+
+    return "";
+  }
+
+  function normalizeTimeText(value) {
+    const text = String(value ?? "").trim();
+    if (!text) return "";
+
+    // Keep normal DTR time values like 23:54 or 00:56.
+    const plain = text.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (plain) return String(plain[1]).padStart(2, "0") + ":" + plain[2];
+
+    // Support ISO/string timestamps if Apps Script returns a formatted date-time.
+    const embedded = text.match(/(?:T|\s)(\d{1,2}):(\d{2})(?::\d{2})?/);
+    if (embedded) return String(embedded[1]).padStart(2, "0") + ":" + embedded[2];
+
+    return text;
+  }
+
+  function normalizeDtrRecord(rec, targetDate, markPreviousNight) {
+    if (!rec) return null;
+
+    const recDate = normalizeIsoDateValue(getRecordField(rec, [
+      "date", "Date", "workDate", "Work Date", "DTR Date"
+    ]));
+
+    // When Apps Script returns only the requested date, rec.date may be blank.
+    // When it returns many rows, use only the row matching the requested date.
+    if (recDate && targetDate && recDate !== targetDate) return null;
+
+    const codeKey = String(getRecordField(rec, [
+      "code", "employeeCode", "Employee Code", "EmployeeCode", "Employee ID", "ID"
+    ])).trim().toUpperCase();
+
+    if (!codeKey) return null;
+
+    const copy = Object.assign({}, rec, {
+      code: codeKey,
+      employeeCode: codeKey,
+      date: recDate || targetDate,
+      workDate: getRecordField(rec, ["workDate", "Work Date"]) || recDate || targetDate,
+
+      arrival: normalizeTimeText(getRecordField(rec, ["arrival", "Arrival", "Arrived"])),
+      breakStart: normalizeTimeText(getRecordField(rec, ["breakStart", "Break Start", "Main Break Start"])),
+      shortBreakStart: normalizeTimeText(getRecordField(rec, ["shortBreakStart", "Short Break Start"])),
+      breakEnd: normalizeTimeText(getRecordField(rec, ["breakEnd", "Break End", "Main Break End"])),
+      shortBreakEnd: normalizeTimeText(getRecordField(rec, ["shortBreakEnd", "Short Break End"])),
+      departure: normalizeTimeText(getRecordField(rec, ["departure", "Departure", "Out"])),
+      lastAction: String(getRecordField(rec, ["lastAction", "Last Action"])).trim(),
+      timestamp: String(getRecordField(rec, ["timestamp", "Timestamp"])).trim()
+    });
+
+    if (markPreviousNight) copy.previousNight = true;
+    return copy;
+  }
+
   function getRecordCode(rec) {
-    return String((rec && (rec.code || rec.employeeCode || rec["Employee Code"])) || "").trim().toUpperCase();
+    return String(getRecordField(rec, [
+      "code", "employeeCode", "Employee Code", "EmployeeCode", "Employee ID", "ID"
+    ]) || "").trim().toUpperCase();
   }
 
   function recordProgressScore(rec) {
@@ -635,23 +721,12 @@
 
   function buildRecordMap(records, targetDate, markPreviousNight) {
     const map = {};
-    (records || []).forEach(function(rec) {
-      if (!rec) return;
-      const recDate = normalizeIsoDateValue(rec.date || rec.workDate || rec.Date || "");
+    (records || []).forEach(function(rawRec) {
+      const copy = normalizeDtrRecord(rawRec, targetDate, markPreviousNight);
+      if (!copy) return;
 
-      // When Apps Script returns only the requested date, rec.date may be blank.
-      // When it returns many rows, use only the row matching the requested date.
-      if (recDate && recDate !== targetDate) return;
-
-      const codeKey = getRecordCode(rec);
+      const codeKey = getRecordCode(copy);
       if (!codeKey) return;
-
-      const copy = Object.assign({}, rec, {
-        code: rec.code || rec.employeeCode || rec["Employee Code"] || codeKey,
-        date: recDate || targetDate,
-        workDate: rec.workDate || recDate || targetDate
-      });
-      if (markPreviousNight) copy.previousNight = true;
 
       const old = map[codeKey];
       if (!old || recordProgressScore(copy) >= recordProgressScore(old)) {
@@ -746,7 +821,9 @@
 
   function filterRowsByDate(rows, targetDate) {
     return (rows || []).filter(function(row) {
-      return normalizeIsoDateValue(row.date || row.Date || row.workDate || "") === targetDate;
+      return normalizeIsoDateValue(getRecordField(row, [
+        "date", "Date", "workDate", "Work Date", "DTR Date"
+      ])) === targetDate;
     });
   }
 
