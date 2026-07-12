@@ -583,6 +583,9 @@
   let employeeStateRequestToken = 0;
   let employeeLookupTimer = null;
   const pendingWritesByCode = Object.create(null);
+  const dtrBroadcastChannel = ("BroadcastChannel" in window)
+    ? new BroadcastChannel("ks-dtr-live")
+    : null;
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
   const MIN_BREAK_END_MINUTES = 12; // hide end buttons until break is at least 12 minutes
@@ -1051,6 +1054,89 @@
       code: emp.code,
       date: fmt()
     }, 6000);
+  }
+
+  function announceDtrChange(emp, key, time) {
+    const message = {
+      ts: Date.now(),
+      code: emp && emp.code ? String(emp.code) : "",
+      action: key || "",
+      time: time || ""
+    };
+
+    try {
+      localStorage.setItem("ks_dtr_live_event", JSON.stringify(message));
+    } catch (_) {}
+
+    try {
+      if (dtrBroadcastChannel) dtrBroadcastChannel.postMessage(message);
+    } catch (_) {}
+  }
+
+  function employeeStateContainsAction(data, emp, key, expectedTime, workDate) {
+    if (!data || data.ok === false) return false;
+
+    const fieldKeys = {
+      arrival: ["arrival", "Arrival"],
+      breakStart: ["breakStart", "Break Start"],
+      shortBreakStart: ["shortBreakStart", "Short Break Start"],
+      breakEnd: ["breakEnd", "Break End"],
+      shortBreakEnd: ["shortBreakEnd", "Short Break End"],
+      departure: ["departure", "Departure"]
+    };
+
+    const expected = normalizeTimeText(expectedTime);
+    const expectedAction = normalizeLastActionText(labels[key] || key);
+    const records = toRecordArray(data.todayRecords || []).concat(
+      toRecordArray(data.previousRecords || [])
+    );
+
+    return records.some(function(rec) {
+      const recordDate = normalizeIsoDateValue(getRecordField(rec, ["date", "Date", "workDate", "Work Date"]));
+      if (workDate && recordDate && recordDate !== workDate) return false;
+
+      const code = String(getRecordField(rec, ["code", "employeeCode", "Employee Code"]) || "").trim().toUpperCase();
+      if (code && emp && code !== String(emp.code || "").trim().toUpperCase()) return false;
+
+      const recordedTime = normalizeTimeText(getRecordField(rec, fieldKeys[key] || [key]));
+      if (recordedTime && expected && recordedTime === expected) return true;
+
+      const lastAction = normalizeLastActionText(getRecordField(rec, ["lastAction", "Last Action"]));
+      return lastAction === expectedAction && !!recordedTime;
+    });
+  }
+
+  function applyVerifiedEmployeeState(data, emp) {
+    if (!data || data.ok === false || !emp) return;
+    const codeKey = String(emp.code || "").trim().toUpperCase();
+    const today = normalizeIsoDateValue(data.todayDate) || fmt();
+    const previous = normalizeIsoDateValue(data.previousDate) || dateOffsetStr(new Date(), -1);
+    const todayMap = buildRecordMap(data.todayRecords || [], today, false);
+    const previousMap = buildRecordMap(data.previousRecords || [], previous, true);
+
+    todayDateStr = today;
+    previousDateStr = previous;
+    todayRecords[codeKey] = todayMap[codeKey] || {};
+    previousRecords[codeKey] = previousMap[codeKey] || {};
+    updateReminderStack();
+  }
+
+  async function verifyAttendanceSaved(emp, key, expectedTime, workDate) {
+    // A JSONP timeout does not always mean the write failed. Apps Script can
+    // finish the Sheet update after the browser timeout, especially on a cold
+    // start. Verify the actual employee row before showing an error.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        const data = await fetchEmployeeState(emp);
+        if (employeeStateContainsAction(data, emp, key, expectedTime, workDate)) {
+          applyVerifiedEmployeeState(data, emp);
+          return true;
+        }
+      } catch (_) {}
+
+      await new Promise(function(resolve) { setTimeout(resolve, 700); });
+    }
+    return false;
   }
 
   async function refreshEmployeeState(emp) {
@@ -2049,11 +2135,21 @@
           throw new Error((result && result.error) || "Google Sheet did not confirm the action.");
         }
         delete pendingWritesByCode[codeKey];
+        announceDtrChange(emp, key, time);
         return refreshEmployeeState(emp);
       })
-      .catch(function(err) {
+      .catch(async function(err) {
+        console.warn("Attendance response was not confirmed; checking Google Sheet:", err);
+
+        const wasSaved = await verifyAttendanceSaved(emp, key, time, workDate);
         delete pendingWritesByCode[codeKey];
-        console.error("Attendance write failed:", err);
+
+        if (wasSaved) {
+          announceDtrChange(emp, key, time);
+          return;
+        }
+
+        console.error("Attendance write failed after verification:", err);
         toast("⚠ Action was not saved. Please try again.", "err");
         setTimeout(hideToast, 3500);
       });
@@ -2076,7 +2172,7 @@
     // Unlike no-cors POST, this gives the kiosk a real success/failure response.
     return jsonpRequest({
       data: JSON.stringify(payload)
-    }, 8000);
+    }, 5000);
   }
 
   // ── QR Scanner ────────────────────────────────────────────────────────────
