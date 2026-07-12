@@ -579,7 +579,7 @@
   let recordsReady = false;
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
-  const MIN_BREAK_END_MINUTES = 12; // hide end buttons until break is at least 15 minutes
+  const MIN_BREAK_END_MINUTES = 12; // hide end buttons until break is at least 12 minutes
   const REMINDER_BEFORE_SHIFT_END_MINUTES = 6 * 60; // liquid reminder starts 4 hours before shift end
 
   // Clock
@@ -602,17 +602,36 @@
     return fmt(d);
   }
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v12";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v13";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function normalizeIsoDateValue(value) {
     if (!value) return "";
     const text = String(value).trim();
-    const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-    if (iso) return iso[1] + "-" + String(iso[2]).padStart(2,"0") + "-" + String(iso[3]).padStart(2,"0");
-    const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (slash) return slash[3] + "-" + String(slash[1]).padStart(2,"0") + "-" + String(slash[2]).padStart(2,"0");
-    return text.slice(0,10);
+    if (!text) return "";
+
+    // A plain sheet date is already the correct work date.
+    const plainIso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (plainIso) {
+      return plainIso[1] + "-" + String(plainIso[2]).padStart(2,"0") + "-" + String(plainIso[3]).padStart(2,"0");
+    }
+
+    const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (slash) {
+      return slash[3] + "-" + String(slash[1]).padStart(2,"0") + "-" + String(slash[2]).padStart(2,"0");
+    }
+
+    // Google Apps Script may serialize a July 11 sheet date as
+    // 2026-07-10T20:00:00.000Z. Convert it using the kiosk's local timezone
+    // instead of taking the UTC YYYY-MM-DD prefix.
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return fmt(parsed);
+
+    const isoPrefix = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoPrefix) {
+      return isoPrefix[1] + "-" + String(isoPrefix[2]).padStart(2,"0") + "-" + String(isoPrefix[3]).padStart(2,"0");
+    }
+    return "";
   }
 
   function normalizeRecordKey(key) {
@@ -668,6 +687,45 @@
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, " ")
       .replace(/\s+/g, " ");
+  }
+
+  function normalizeLastActionText(value) {
+    return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function localTimeFromTimestamp(value) {
+    if (!value) return "";
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toLocaleTimeString("en-US", {hour:"2-digit", minute:"2-digit", hour12:false});
+    }
+    return normalizeTimeText(value);
+  }
+
+  function enforceNightShiftLastActionState(rec, emp) {
+    const fixed = Object.assign({}, rec || {});
+    if (!isNightShiftEmployee(emp)) return fixed;
+
+    // Last Action is authoritative for an unfinished break. This protects the
+    // kiosk even when a DTR API row is partial, a time column is shifted, or
+    // the after-midnight row was returned separately from the work-date row.
+    const action = normalizeLastActionText(fixed.lastAction);
+    if (action === "shortbreakstart") {
+      if (!hasValue(fixed.shortBreakStart)) {
+        fixed.shortBreakStart = localTimeFromTimestamp(fixed.timestamp) || "OPEN";
+      }
+      fixed.shortBreakEnd = "";
+    } else if (action === "breakstart") {
+      if (!hasValue(fixed.breakStart)) {
+        fixed.breakStart = localTimeFromTimestamp(fixed.timestamp) || "OPEN";
+      }
+      fixed.breakEnd = "";
+    } else if (action === "shortbreakend" && !hasValue(fixed.shortBreakEnd)) {
+      fixed.shortBreakEnd = localTimeFromTimestamp(fixed.timestamp) || "RECORDED";
+    } else if (action === "breakend" && !hasValue(fixed.breakEnd)) {
+      fixed.breakEnd = localTimeFromTimestamp(fixed.timestamp) || "RECORDED";
+    }
+    return fixed;
   }
 
   function resolveRecordEmployeeCode(rec) {
@@ -793,9 +851,39 @@
     return merged;
   }
 
+  function toRecordArray(records) {
+    if (Array.isArray(records)) return records;
+    if (!records || typeof records !== "object") return [];
+    return Object.keys(records).map(function(key) { return records[key]; }).filter(function(row) {
+      return row && typeof row === "object";
+    });
+  }
+
+  function extractDtrRows(result) {
+    if (Array.isArray(result)) return result;
+    if (!result || typeof result !== "object") return [];
+
+    const preferredKeys = ["rows", "data", "records", "dtrRows", "DTR", "values"];
+    for (const key of preferredKeys) {
+      if (Array.isArray(result[key])) return result[key];
+    }
+
+    // One-level nested fallback for Apps Script wrappers such as
+    // { success:true, result:{ rows:[...] } }.
+    for (const key of Object.keys(result)) {
+      const value = result[key];
+      if (value && typeof value === "object") {
+        for (const nestedKey of preferredKeys) {
+          if (Array.isArray(value[nestedKey])) return value[nestedKey];
+        }
+      }
+    }
+    return [];
+  }
+
   function buildRecordMap(records, targetDate, markPreviousNight) {
     const map = {};
-    (records || []).forEach(function(rawRec) {
+    toRecordArray(records).forEach(function(rawRec) {
       const copy = normalizeDtrRecord(rawRec, targetDate, markPreviousNight);
       if (!copy) return;
 
@@ -943,7 +1031,7 @@
       // when the staff already completed all breaks for the active night shift.
       try {
         const rowsResult = await fetchDtrRows();
-        allDtrRows = rowsResult.rows || [];
+        allDtrRows = extractDtrRows(rowsResult);
       } catch(rowsErr) {
         console.warn("DTR rows sync failed; using getEmployees records only:", rowsErr);
       }
@@ -1071,8 +1159,8 @@
 
   function getActiveRecordState(emp) {
     const codeKey = String((emp && emp.code) || "").toUpperCase();
-    const todayRec = todayRecords[codeKey] || {};
-    const previousRec = previousRecords[codeKey] || {};
+    const todayRec = enforceNightShiftLastActionState(todayRecords[codeKey] || {}, emp);
+    const previousRec = enforceNightShiftLastActionState(previousRecords[codeKey] || {}, emp);
 
     // An unfinished night-shift break must always take priority before noon,
     // even when the schedule parser or shift-end calculation is inconsistent.
@@ -1496,6 +1584,22 @@
     if (isDayOffScheduled(emp, rec)) return [];
     if (isMorningShiftDutyFinished(emp, rec)) return [];
 
+    // Afternoon/night shift safety rule: when Google Sheet says the latest
+    // action is a break start and its matching end is blank, never show either
+    // start button. Only the matching End button is allowed. This applies to
+    // both 8-hour and 12-hour afternoon duties.
+    if (isNightShiftEmployee(emp)) {
+      const latestAction = normalizeLastActionText(rec.lastAction);
+      if (latestAction === "shortbreakstart" && !hasValue(rec.shortBreakEnd)) {
+        const shortStartValue = hasValue(rec.shortBreakStart) ? rec.shortBreakStart : "";
+        return shortStartValue && isBreakEndTooSoon(shortStartValue) ? [] : ["shortBreakEnd"];
+      }
+      if (latestAction === "breakstart" && !hasValue(rec.breakEnd)) {
+        const mainStartValue = hasValue(rec.breakStart) ? rec.breakStart : "";
+        return mainStartValue && isBreakEndTooSoon(mainStartValue) ? [] : ["breakEnd"];
+      }
+    }
+
     // Schedule is the source of truth:
     // 8 hrs  = main break only
     // 12 hrs = main break + short break
@@ -1597,7 +1701,9 @@
 
     const codeKey = String(emp.code).toUpperCase();
     const activeState = getActiveRecordState(emp);
-    const rec = cleanStaleNightShiftEnds(activeState.record || {}, emp);
+    const rec = enforceNightShiftLastActionState(
+      cleanStaleNightShiftEnds(activeState.record || {}, emp), emp
+    );
     saveActiveRecordState(emp, rec, activeState);
 
     if (!recordsReady) {
@@ -1716,7 +1822,9 @@
     const codeKey = String(emp.code).toUpperCase();
     const activeState = getActiveRecordState(emp);
     const workDate = activeState.date || calendarDate;
-    const activeRec = cleanStaleNightShiftEnds(activeState.record || {}, emp);
+    const activeRec = enforceNightShiftLastActionState(
+      cleanStaleNightShiftEnds(activeState.record || {}, emp), emp
+    );
     saveActiveRecordState(emp, activeRec, activeState);
 
     if (isDayOffScheduled(emp, activeRec)) {
