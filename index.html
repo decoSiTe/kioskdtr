@@ -577,6 +577,9 @@
   let todayDateStr = "";
   let previousDateStr = "";
   let recordsReady = false;
+  let syncInProgress = false;
+  let syncQueued = false;
+  let lastSheetSyncAt = 0;
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
   const MIN_BREAK_END_MINUTES = 12; // hide end buttons until break is at least 12 minutes
@@ -602,7 +605,7 @@
     return fmt(d);
   }
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v13";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v14";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function normalizeIsoDateValue(value) {
@@ -950,6 +953,33 @@
     }
   }
 
+  async function fetchKioskSync(targetDate) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const requestId = Date.now() + "-" + Math.random().toString(36).slice(2);
+      const url = SCRIPT_URL +
+        "?action=getKioskSync&date=" + encodeURIComponent(targetDate) +
+        "&_=" + encodeURIComponent(requestId);
+
+      const r = await fetch(url, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        signal: controller.signal
+      });
+
+      if (!r.ok) throw new Error("Google Sheet sync failed: HTTP " + r.status);
+      const data = await r.json();
+      if (!data || data.ok === false) {
+        throw new Error((data && data.error) || "Google Sheet sync returned no data.");
+      }
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function fetchEmployeesForDate(targetDate) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
@@ -988,14 +1018,23 @@
 
   // ── Load employees from Google Sheets ─────────────────────────────────────
   async function loadEmps(silent) {
-    // Only skip if URL is literally the placeholder text
+    // Only skip if URL is literally the placeholder text.
     if (!SCRIPT_URL || SCRIPT_URL.trim() === "YOUR_APPS_SCRIPT_URL_HERE") {
       toast("⚠ Script URL not configured","err");
       show("loadCard",false); show("inputCard",true);
       return;
     }
 
-    // Fast start: show the kiosk immediately using local cache, then sync fresh data in the background.
+    // Prevent two refreshes from overwriting each other. If another refresh is
+    // requested while one is running, run it immediately after the first one.
+    if (syncInProgress) {
+      syncQueued = true;
+      return;
+    }
+    syncInProgress = true;
+
+    // Fast start: cache is used only to display the kiosk immediately.
+    // Every normal load and every 1-minute refresh still reads Google Sheet.
     if (!silent) {
       const hasCache = loadEmployeeCache();
       show("loadCard",false);
@@ -1003,86 +1042,121 @@
       document.getElementById("empIn").focus();
 
       if (hasCache) {
-        toast("✓ Employees ready. Syncing latest records...", "ok");
+        toast("✓ Employees ready. Syncing live Google Sheet data...", "ok");
         setTimeout(hideToast, 900);
       } else {
-        toast("Syncing employees...", "warn");
+        toast("Syncing live Google Sheet data...", "warn");
       }
     }
 
     try {
       const today = fmt();
       const previous = dateOffsetStr(new Date(), -1);
-      const d = await fetchEmployeesForDate(today);
-      let dPrev = { todayRecords: [] };
-      let allDtrRows = [];
+      let merged = null;
 
-      // Afternoon/night shift breaks after midnight still belong to the previous work date.
-      // Load yesterday also, so buttons are based on the actual Google Sheet row for that shift.
+      // Preferred method: one Apps Script request returns employees plus the
+      // latest today/yesterday DTR rows from one locked Google Sheet snapshot.
       try {
-        dPrev = await fetchEmployeesForDate(previous);
-      } catch(prevErr) {
-        console.warn("Previous shift record sync failed:", prevErr);
+        const live = await fetchKioskSync(today);
+        const allDtrRows = extractDtrRows(live.dtrRows || live.rows || []);
+        const todayRows = filterRowsByDate(allDtrRows, today);
+        const previousRows = filterRowsByDate(allDtrRows, previous);
+
+        merged = {
+          employees: live.employees || [],
+          todayDate: normalizeIsoDateValue(live.todayDate) || today,
+          previousDate: normalizeIsoDateValue(live.previousDate) || previous,
+          todayRecords: toRecordArray(live.todayRecords || []).concat(todayRows),
+          previousRecords: toRecordArray(live.previousRecords || []).concat(previousRows),
+          recordsReady: true
+        };
+      } catch (liveSyncError) {
+        // Backward-compatible fallback when the currently deployed Code.gs
+        // does not yet include getKioskSync.
+        console.warn("Single-request live sync failed; using legacy sync:", liveSyncError);
+
+        const d = await fetchEmployeesForDate(today);
+        let dPrev = { todayRecords: [] };
+        let allDtrRows = [];
+
+        try {
+          dPrev = await fetchEmployeesForDate(previous);
+        } catch(prevErr) {
+          console.warn("Previous shift record sync failed:", prevErr);
+        }
+
+        try {
+          const rowsResult = await fetchDtrRows();
+          allDtrRows = extractDtrRows(rowsResult);
+        } catch(rowsErr) {
+          console.warn("DTR rows sync failed; using getEmployees records only:", rowsErr);
+        }
+
+        const todayRows = filterRowsByDate(allDtrRows, today);
+        const previousRows = filterRowsByDate(allDtrRows, previous);
+
+        merged = {
+          employees: (d.employees && d.employees.length) ? d.employees : (dPrev.employees || []),
+          todayDate: today,
+          previousDate: previous,
+          todayRecords: toRecordArray(d.todayRecords || []).concat(todayRows),
+          previousRecords: toRecordArray(dPrev.todayRecords || []).concat(previousRows),
+          recordsReady: true
+        };
       }
 
-      // Source of truth for button logic:
-      // getDtrRows returns the actual DTR table rows, so completed previous-night
-      // breaks are also detected. This prevents showing Break Start / Short Break Start
-      // when the staff already completed all breaks for the active night shift.
-      try {
-        const rowsResult = await fetchDtrRows();
-        allDtrRows = extractDtrRows(rowsResult);
-      } catch(rowsErr) {
-        console.warn("DTR rows sync failed; using getEmployees records only:", rowsErr);
-      }
-
-      const todayRows = filterRowsByDate(allDtrRows, today);
-      const previousRows = filterRowsByDate(allDtrRows, previous);
-
-      const merged = {
-        employees: (d.employees && d.employees.length) ? d.employees : (dPrev.employees || []),
-        todayDate: today,
-        previousDate: previous,
-
-        // Always combine getEmployees records with getDtrRows records.
-        // Previously, one non-empty DTR result replaced the fallback completely;
-        // rows without employee codes were then dropped, making the kiosk think
-        // there was no open Short Break Start after midnight.
-        todayRecords: (d.todayRecords || []).concat(todayRows || []),
-        previousRecords: (dPrev.todayRecords || []).concat(previousRows || []),
-        recordsReady: true
-      };
-
+      // Replace the kiosk state with the fresh Google Sheet snapshot.
+      // applyEmployeeData also re-checks the employee currently entered,
+      // so visible buttons change immediately after the 1-minute sync.
       applyEmployeeData(merged);
       saveEmployeeCache(merged);
+      lastSheetSyncAt = Date.now();
 
       if (employees.length === 0) {
         if (!silent) toast("No employees found. Add from Admin Panel first.","err");
-      } else {
-        if (!silent) {
-          toast("✓ " + employees.length + " employee(s) loaded", "ok");
-          setTimeout(hideToast, 900);
-        }
+      } else if (!silent) {
+        toast("✓ Live Google Sheet data synced", "ok");
+        setTimeout(hideToast, 900);
       }
     } catch(e) {
+      recordsReady = employees.length > 0;
       if (!silent && employees.length === 0) {
         if (e.name === "AbortError") {
-          toast("⏱ Server is slow. Try refreshing.","err");
+          toast("⏱ Google Sheet sync timed out. Try refreshing.","err");
         } else {
-          toast("⚠ Error: " + e.message,"err");
+          toast("⚠ Sync error: " + e.message,"err");
         }
       } else {
-        console.warn("Employee sync failed:", e);
+        console.warn("Live Google Sheet sync failed:", e);
+      }
+    } finally {
+      syncInProgress = false;
+      if (syncQueued) {
+        syncQueued = false;
+        setTimeout(function() {
+          if (!isSending) loadEmps(true);
+        }, 0);
       }
     }
   }
   loadEmps(false);
 
-  // Auto-refresh kiosk data every 1 minute to get the latest Google Sheet records.
-  // This only syncs the data in the background; it does not change the kiosk flow.
+  // Read the actual Google Sheet every 60 seconds. The cache is never used as
+  // the source for this refresh. Current employee buttons and reminders are
+  // recalculated from the newly downloaded DTR rows.
   setInterval(function() {
     if (!isSending) loadEmps(true);
   }, AUTO_REFRESH_MS);
+
+  // Also sync immediately when the kiosk returns online or the browser tab
+  // becomes active again, instead of waiting for the next one-minute cycle.
+  window.addEventListener("online", function() {
+    if (!isSending) loadEmps(true);
+  });
+
+  document.addEventListener("visibilitychange", function() {
+    if (!document.hidden && !isSending) loadEmps(true);
+  });
 
   // ── Live employee lookup ──────────────────────────────────────────────────
   document.getElementById("empIn").addEventListener("input", function(e) {
