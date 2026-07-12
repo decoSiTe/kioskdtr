@@ -602,7 +602,7 @@
     return fmt(d);
   }
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v11";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v12";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function normalizeIsoDateValue(value) {
@@ -662,6 +662,52 @@
     return text;
   }
 
+  function normalizeEmployeeName(value) {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ");
+  }
+
+  function resolveRecordEmployeeCode(rec) {
+    const directCode = String(getRecordField(rec, [
+      "code", "employeeCode", "Employee Code", "EmployeeCode", "Employee ID", "ID"
+    ]) || "").trim().toUpperCase();
+    if (directCode) return directCode;
+
+    // Some getDtrRows responses contain Employee Name but no employee code.
+    // Resolve those rows against the Employees sheet so an open after-midnight
+    // Short Break Start is not discarded before the button logic runs.
+    const recordName = normalizeEmployeeName(getRecordField(rec, [
+      "employeeName", "Employee Name", "Employee", "name", "Name"
+    ]));
+    if (!recordName) return "";
+
+    const recordDepartment = normalizeEmployeeName(getRecordField(rec, ["department", "Department"]));
+    const recordPosition = normalizeEmployeeName(getRecordField(rec, ["position", "Position"]));
+
+    let matches = (employees || []).filter(function(emp) {
+      return normalizeEmployeeName(emp && emp.name) === recordName;
+    });
+
+    if (matches.length > 1 && recordDepartment) {
+      const departmentMatches = matches.filter(function(emp) {
+        return normalizeEmployeeName(emp && emp.department) === recordDepartment;
+      });
+      if (departmentMatches.length) matches = departmentMatches;
+    }
+
+    if (matches.length > 1 && recordPosition) {
+      const positionMatches = matches.filter(function(emp) {
+        return normalizeEmployeeName(emp && emp.position) === recordPosition;
+      });
+      if (positionMatches.length) matches = positionMatches;
+    }
+
+    return matches.length === 1 ? String(matches[0].code || "").trim().toUpperCase() : "";
+  }
+
   function normalizeDtrRecord(rec, targetDate, markPreviousNight) {
     if (!rec) return null;
 
@@ -673,15 +719,13 @@
     // When it returns many rows, use only the row matching the requested date.
     if (recDate && targetDate && recDate !== targetDate) return null;
 
-    const codeKey = String(getRecordField(rec, [
-      "code", "employeeCode", "Employee Code", "EmployeeCode", "Employee ID", "ID"
-    ])).trim().toUpperCase();
-
+    const codeKey = resolveRecordEmployeeCode(rec);
     if (!codeKey) return null;
 
     const copy = Object.assign({}, rec, {
       code: codeKey,
       employeeCode: codeKey,
+      employeeName: String(getRecordField(rec, ["employeeName", "Employee Name", "Employee", "name", "Name"]) || "").trim(),
       date: recDate || targetDate,
       workDate: getRecordField(rec, ["workDate", "Work Date"]) || recDate || targetDate,
 
@@ -719,6 +763,36 @@
     return score;
   }
 
+  function mergeNormalizedDtrRecords(oldRec, newRec, markPreviousNight) {
+    if (!oldRec) return Object.assign({}, newRec);
+    if (!newRec) return Object.assign({}, oldRec);
+
+    // Merge non-empty action columns instead of selecting only one row.
+    // This supports both cumulative DTR rows and APIs that return one partial
+    // snapshot per action. Most importantly, Short Break Start survives even
+    // when another row has a higher general progress score.
+    const merged = Object.assign({}, oldRec);
+    const fields = [
+      "arrival", "breakStart", "shortBreakStart",
+      "breakEnd", "shortBreakEnd", "departure"
+    ];
+
+    fields.forEach(function(field) {
+      if (hasValue(newRec[field])) merged[field] = newRec[field];
+    });
+
+    if (hasValue(newRec.lastAction)) merged.lastAction = newRec.lastAction;
+    if (hasValue(newRec.timestamp)) merged.timestamp = newRec.timestamp;
+    if (hasValue(newRec.employeeName)) merged.employeeName = newRec.employeeName;
+
+    merged.code = newRec.code || oldRec.code;
+    merged.employeeCode = merged.code;
+    merged.date = newRec.date || oldRec.date;
+    merged.workDate = newRec.workDate || oldRec.workDate || merged.date;
+    if (markPreviousNight) merged.previousNight = true;
+    return merged;
+  }
+
   function buildRecordMap(records, targetDate, markPreviousNight) {
     const map = {};
     (records || []).forEach(function(rawRec) {
@@ -728,10 +802,7 @@
       const codeKey = getRecordCode(copy);
       if (!codeKey) return;
 
-      const old = map[codeKey];
-      if (!old || recordProgressScore(copy) >= recordProgressScore(old)) {
-        map[codeKey] = copy;
-      }
+      map[codeKey] = mergeNormalizedDtrRecords(map[codeKey], copy, markPreviousNight);
     });
     return map;
   }
@@ -881,11 +952,16 @@
       const previousRows = filterRowsByDate(allDtrRows, previous);
 
       const merged = {
-        employees: d.employees || dPrev.employees || [],
+        employees: (d.employees && d.employees.length) ? d.employees : (dPrev.employees || []),
         todayDate: today,
         previousDate: previous,
-        todayRecords: todayRows.length ? todayRows : (d.todayRecords || []),
-        previousRecords: previousRows.length ? previousRows : (dPrev.todayRecords || []),
+
+        // Always combine getEmployees records with getDtrRows records.
+        // Previously, one non-empty DTR result replaced the fallback completely;
+        // rows without employee codes were then dropped, making the kiosk think
+        // there was no open Short Break Start after midnight.
+        todayRecords: (d.todayRecords || []).concat(todayRows || []),
+        previousRecords: (dPrev.todayRecords || []).concat(previousRows || []),
         recordsReady: true
       };
 
@@ -997,6 +1073,28 @@
     const codeKey = String((emp && emp.code) || "").toUpperCase();
     const todayRec = todayRecords[codeKey] || {};
     const previousRec = previousRecords[codeKey] || {};
+
+    // An unfinished night-shift break must always take priority before noon,
+    // even when the schedule parser or shift-end calculation is inconsistent.
+    // This guarantees that a 04:00–06:59 Short Break Start shows only
+    // Short Break End when the employee returns.
+    if (isNightShiftEmployee(emp) && currentMinutes() < (12 * 60)) {
+      const workDate = previousDateStr || dateOffsetStr(new Date(), -1);
+      if (hasOpenMainBreak(previousRec) || hasOpenShortBreak(previousRec)) {
+        return {
+          source: "previous",
+          date: workDate,
+          record: Object.assign({}, previousRec, { date: workDate, previousNight: true, workDate: workDate })
+        };
+      }
+      if (hasOpenMainBreak(todayRec) || hasOpenShortBreak(todayRec)) {
+        return {
+          source: "today",
+          date: workDate,
+          record: Object.assign({}, todayRec, { date: workDate, previousNight: true, workDate: workDate, calendarDate: todayDateStr || fmt() })
+        };
+      }
+    }
 
     if (isNightShiftEmployee(emp) && isEarlyMorningShiftWindow(emp)) {
       const workDate = previousDateStr || dateOffsetStr(new Date(), -1);
