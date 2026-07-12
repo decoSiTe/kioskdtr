@@ -580,6 +580,9 @@
   let syncInProgress = false;
   let syncQueued = false;
   let lastSheetSyncAt = 0;
+  let employeeStateRequestToken = 0;
+  let employeeLookupTimer = null;
+  const pendingWritesByCode = Object.create(null);
   const QUICK_RESET_MS = 350;
   const AUTO_REFRESH_MS = 60 * 1000; // refresh latest employee/DTR data every 1 minute
   const MIN_BREAK_END_MINUTES = 12; // hide end buttons until break is at least 12 minutes
@@ -605,7 +608,7 @@
     return fmt(d);
   }
 
-  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v14";
+  const EMP_CACHE_KEY = "kioskdtr_employee_cache_v15";
   const EMP_CACHE_MAX_AGE_MS = 15 * 1000; // keep break state fresh; employees still load fast from cache
 
   function normalizeIsoDateValue(value) {
@@ -907,6 +910,29 @@
     todayRecords = buildRecordMap(data.todayRecords || [], todayDateStr, false);
     previousRecords = buildRecordMap(data.previousRecords || [], previousDateStr, true);
 
+    // A just-tapped action is kept locally until Apps Script confirms the write.
+    // This prevents an older background snapshot from showing Break End again.
+    Object.keys(pendingWritesByCode).forEach(function(codeKey) {
+      const pending = pendingWritesByCode[codeKey];
+      if (!pending || !pending.record) return;
+
+      if (pending.source === "previous") {
+        previousRecords[codeKey] = Object.assign(
+          {},
+          previousRecords[codeKey] || {},
+          pending.record,
+          { date: pending.date, workDate: pending.date, previousNight: true }
+        );
+      } else {
+        todayRecords[codeKey] = Object.assign(
+          {},
+          todayRecords[codeKey] || {},
+          pending.record,
+          { date: pending.date, workDate: pending.date }
+        );
+      }
+    });
+
     const currentCode = document.getElementById("empIn")?.value.trim().toUpperCase();
     if (currentCode) {
       document.getElementById("empIn").dispatchEvent(new Event("input"));
@@ -953,58 +979,111 @@
     }
   }
 
-  async function fetchKioskSync(targetDate) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      const requestId = Date.now() + "-" + Math.random().toString(36).slice(2);
-      const url = SCRIPT_URL +
-        "?action=getKioskSync&date=" + encodeURIComponent(targetDate) +
-        "&_=" + encodeURIComponent(requestId);
+  function jsonpRequest(params, timeoutMs) {
+    timeoutMs = Number(timeoutMs || 8000);
 
-      const r = await fetch(url, {
-        method: "GET",
-        cache: "no-store",
-        credentials: "omit",
-        signal: controller.signal
-      });
+    return new Promise(function(resolve, reject) {
+      const callbackName = "__kiosk_cb_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+      const script = document.createElement("script");
+      let finished = false;
 
-      if (!r.ok) throw new Error("Google Sheet sync failed: HTTP " + r.status);
-      const data = await r.json();
-      if (!data || data.ok === false) {
-        throw new Error((data && data.error) || "Google Sheet sync returned no data.");
+      const timer = setTimeout(function() {
+        cleanup();
+        reject(new Error("Google Sheet request timed out."));
+      }, timeoutMs);
+
+      function cleanup() {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        try { delete window[callbackName]; } catch (_) { window[callbackName] = undefined; }
+        if (script.parentNode) script.parentNode.removeChild(script);
       }
-      return data;
-    } finally {
-      clearTimeout(timer);
+
+      window[callbackName] = function(data) {
+        cleanup();
+        resolve(data || {});
+      };
+
+      const query = new URLSearchParams(
+        Object.assign({}, params || {}, {
+          callback: callbackName,
+          _: Date.now() + "-" + Math.random().toString(36).slice(2)
+        })
+      );
+
+      script.onerror = function() {
+        cleanup();
+        reject(new Error("Could not connect to Google Sheet."));
+      };
+      script.src = SCRIPT_URL + "?" + query.toString();
+      document.body.appendChild(script);
+    });
+  }
+
+  async function fetchKioskSync(targetDate) {
+    const data = await jsonpRequest({
+      action: "getKioskSync",
+      date: targetDate
+    }, 8000);
+
+    if (!data || data.ok === false) {
+      throw new Error((data && data.error) || "Google Sheet sync returned no data.");
     }
+    return data;
   }
 
   async function fetchEmployeesForDate(targetDate) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-      const r = await fetch(SCRIPT_URL + "?action=getEmployees&date=" + targetDate + "&_=" + Date.now(), {
-        cache: "no-store",
-        signal: controller.signal
-      });
-      return await r.json();
-    } finally {
-      clearTimeout(timer);
-    }
+    return jsonpRequest({
+      action: "getEmployees",
+      date: targetDate
+    }, 8000);
   }
 
   async function fetchDtrRows() {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    return jsonpRequest({ action: "getDtrRows" }, 8000);
+  }
+
+  async function fetchEmployeeState(emp) {
+    if (!emp || !emp.code) return null;
+    return jsonpRequest({
+      action: "getEmployeeState",
+      code: emp.code,
+      date: fmt()
+    }, 6000);
+  }
+
+  async function refreshEmployeeState(emp) {
+    if (!emp || !emp.code) return;
+    const codeKey = String(emp.code).trim().toUpperCase();
+
+    // The optimistic local state is newer than Google Sheet until the write is
+    // acknowledged, so do not replace it during this short period.
+    if (pendingWritesByCode[codeKey]) return;
+
+    const token = ++employeeStateRequestToken;
     try {
-      const r = await fetch(SCRIPT_URL + "?action=getDtrRows&_=" + Date.now(), {
-        cache: "no-store",
-        signal: controller.signal
-      });
-      return await r.json();
-    } finally {
-      clearTimeout(timer);
+      const data = await fetchEmployeeState(emp);
+      if (token !== employeeStateRequestToken || !data || data.ok === false) return;
+      if (pendingWritesByCode[codeKey]) return;
+
+      const today = normalizeIsoDateValue(data.todayDate) || fmt();
+      const previous = normalizeIsoDateValue(data.previousDate) || dateOffsetStr(new Date(), -1);
+      const todayMap = buildRecordMap(data.todayRecords || [], today, false);
+      const previousMap = buildRecordMap(data.previousRecords || [], previous, true);
+
+      todayDateStr = today;
+      previousDateStr = previous;
+      todayRecords[codeKey] = todayMap[codeKey] || {};
+      previousRecords[codeKey] = previousMap[codeKey] || {};
+
+      const enteredCode = document.getElementById("empIn").value.trim().toUpperCase();
+      if (enteredCode === codeKey) {
+        const freshEmp = data.employee || emp;
+        showEmp(freshEmp);
+      }
+    } catch (err) {
+      console.warn("Employee live state refresh failed:", err);
     }
   }
 
@@ -1134,7 +1213,7 @@
       if (syncQueued) {
         syncQueued = false;
         setTimeout(function() {
-          if (!isSending) loadEmps(true);
+          if (!isSending && Object.keys(pendingWritesByCode).length === 0) loadEmps(true);
         }, 0);
       }
     }
@@ -1145,24 +1224,37 @@
   // the source for this refresh. Current employee buttons and reminders are
   // recalculated from the newly downloaded DTR rows.
   setInterval(function() {
-    if (!isSending) loadEmps(true);
+    if (!isSending && Object.keys(pendingWritesByCode).length === 0) loadEmps(true);
   }, AUTO_REFRESH_MS);
 
   // Also sync immediately when the kiosk returns online or the browser tab
   // becomes active again, instead of waiting for the next one-minute cycle.
   window.addEventListener("online", function() {
-    if (!isSending) loadEmps(true);
+    if (!isSending && Object.keys(pendingWritesByCode).length === 0) loadEmps(true);
   });
 
   document.addEventListener("visibilitychange", function() {
-    if (!document.hidden && !isSending) loadEmps(true);
+    if (!document.hidden && !isSending && Object.keys(pendingWritesByCode).length === 0) loadEmps(true);
   });
 
   // ── Live employee lookup ──────────────────────────────────────────────────
   document.getElementById("empIn").addEventListener("input", function(e) {
     const code = e.target.value.trim().toUpperCase();
     const emp = employees.find(function(x){ return String(x.code).toUpperCase() === code; });
-    if (emp) showEmp(emp); else hideEmp();
+
+    clearTimeout(employeeLookupTimer);
+    if (!emp) {
+      employeeStateRequestToken++;
+      hideEmp();
+      return;
+    }
+
+    // Show the latest local state immediately; then verify this one employee
+    // directly from Google Sheet without waiting for the 1-minute full refresh.
+    showEmp(emp);
+    employeeLookupTimer = setTimeout(function() {
+      refreshEmployeeState(emp);
+    }, 60);
   });
 
   function isDepartureRecorded(rec) {
@@ -1914,7 +2006,17 @@
     }
 
     activeRec[key] = time;
+    activeRec.lastAction = labels[key];
+    activeRec.timestamp = ts;
     saveActiveRecordState(emp, activeRec, activeState);
+
+    // Protect this new state from an older background response until Apps
+    // Script confirms that Google Sheet has committed the action.
+    pendingWritesByCode[codeKey] = {
+      source: activeState.source,
+      date: workDate,
+      record: Object.assign({}, activeRec)
+    };
     const btn = document.querySelector(".abtn[data-a='" + key + "']");
     if (btn) btn.dataset.doneTime = time;
 
@@ -1939,10 +2041,22 @@
 
     toast("✅ " + emp.name + " — " + labels[key] + " at " + time, "ok");
 
-    // Send to Google Sheet in the background so the kiosk clears immediately for the next person.
+    // Clear the kiosk immediately, but wait for the real Apps Script response
+    // in the background. The local action state stays authoritative meanwhile.
     sendToSheet(payload)
-      .then(function(){ return loadEmps(true); })
-      .catch(function(){});
+      .then(function(result) {
+        if (!result || result.ok === false) {
+          throw new Error((result && result.error) || "Google Sheet did not confirm the action.");
+        }
+        delete pendingWritesByCode[codeKey];
+        return refreshEmployeeState(emp);
+      })
+      .catch(function(err) {
+        delete pendingWritesByCode[codeKey];
+        console.error("Attendance write failed:", err);
+        toast("⚠ Action was not saved. Please try again.", "err");
+        setTimeout(hideToast, 3500);
+      });
 
     if (key === "departure") {
       lockDepartedEmployee(emp, time);
@@ -1958,15 +2072,11 @@
   }
 
   async function sendToSheet(payload) {
-    try {
-      await fetch(SCRIPT_URL, {
-        method:"POST", mode:"no-cors",
-        headers:{"Content-Type":"text/plain;charset=utf-8"},
-        body:JSON.stringify(payload)
-      });
-    } catch(e) {
-      try { new Image().src = SCRIPT_URL + "?data=" + encodeURIComponent(JSON.stringify(payload)); } catch(_){}
-    }
+    // JSONP returns only after Code.gs finishes the write and flushes the Sheet.
+    // Unlike no-cors POST, this gives the kiosk a real success/failure response.
+    return jsonpRequest({
+      data: JSON.stringify(payload)
+    }, 8000);
   }
 
   // ── QR Scanner ────────────────────────────────────────────────────────────
